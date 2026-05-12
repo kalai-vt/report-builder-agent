@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Dict, Optional
 
-from langchain.schema import HumanMessage
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
 from app.config import settings

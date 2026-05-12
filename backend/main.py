@@ -37,6 +37,15 @@ async def lifespan(application):
     if not settings.OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY not set — LLM calls will fail")
 
+    if settings.REDIS_URL:
+        from app.cache.redis_cache import sql_cache
+        if sql_cache.health_check():
+            logger.info("Redis connection OK")
+        else:
+            logger.warning("Redis unreachable — report refresh/streaming will be unavailable")
+    else:
+        logger.warning("REDIS_URL not set — report refresh/streaming will be unavailable")
+
     logger.info("Startup complete. Swagger UI: http://localhost:8001/docs")
     yield
 

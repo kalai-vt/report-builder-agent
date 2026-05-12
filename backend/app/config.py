@@ -19,7 +19,7 @@ class Settings:
     DB_HOST: str = os.getenv("DB_HOST", "192.168.2.8")
     DB_PORT: int = int(os.getenv("DB_PORT", "3306"))
     DB_USER: str = os.getenv("DB_USER", "krauser")
-    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "vThink135#")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
     DB_NAME: str = os.getenv("DB_NAME", "vthink_kra")
     DATABASE_URL: str = os.getenv("DATABASE_URL") or _build_db_url()
     DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "10"))
@@ -42,6 +42,12 @@ class Settings:
     DEBUG_MODE: bool = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
     REDIS_URL: str = os.getenv("REDIS_URL", "")
+
+    CACHE_TTL_SECONDS: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+    CACHE_MAX_SIZE: int = int(os.getenv("CACHE_MAX_SIZE", "500"))
+
+    STREAM_CACHE_TTL_SECONDS: int = int(os.getenv("STREAM_CACHE_TTL_SECONDS", "3600"))
+    STREAM_REFRESH_INTERVAL_SECONDS: int = int(os.getenv("STREAM_REFRESH_INTERVAL_SECONDS", "30"))
 
 
 settings = Settings()

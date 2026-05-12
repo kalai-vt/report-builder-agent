@@ -1,160 +1,216 @@
 # KRA AI Report Builder Agent
 
-An AI-powered report generation backend that converts plain-English questions into MySQL queries, executes them against the `vthink_kra` database, and returns structured results with filter recommendations for frontend dashboards.
+An AI-powered backend that converts plain-English questions into MySQL queries, executes them against the `vthink_kra` database, and returns structured results. Includes intent detection, clarification flow, live report refresh via Redis, and WebSocket streaming.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Key Features](#key-features)
 - [Architecture](#architecture)
-- [Pipeline Flow](#pipeline-flow)
+- [Pipeline Flows](#pipeline-flows)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the Server](#running-the-server)
 - [API Reference](#api-reference)
-- [Component Reference](#component-reference)
-  - [main.py — Entry Point](#mainpy--entry-point)
-  - [app/config.py — Settings](#appconfigpy--settings)
-  - [app/graph/state.py — Shared State](#appgraphstatepy--shared-state)
-  - [app/graph/workflow.py — Pipeline Definition](#appgraphworkflowpy--pipeline-definition)
-  - [app/graph/nodes.py — Pipeline Nodes](#appgraphnodespy--pipeline-nodes)
-  - [app/agents/prompt_builder.py — Prompt Assembly](#appagentsprompt_builderpy--prompt-assembly)
-  - [app/agents/llm_agent.py — GPT-4o-mini Client](#appagentsllm_agentpy--gpt-4o-mini-client)
-  - [app/agents/sql_agent.py — SQL Cleaner](#appagentssql_agentpy--sql-cleaner)
-  - [app/validators/sql_validator.py — Safety Gate](#appvalidatorssql_validatorpy--safety-gate)
-  - [app/db/connection.py — MySQL Connection Pool](#appdbconnectionpy--mysql-connection-pool)
-  - [app/db/schema_manager.py — Schema Loader](#appdbschema_managerpy--schema-loader)
-  - [app/memory/conversation_memory.py — Conversation History](#appmemoryconversation_memorypy--conversation-history)
-  - [app/services/filter_recommender.py — Filter Recommender](#appservicesfilter_recommenderpy--filter-recommender)
-  - [app/services/report_service.py — Service Layer](#appservicesreport_servicepy--service-layer)
-  - [app/api/routes.py — API Endpoint](#appapiroutespy--api-endpoint)
-  - [app/models/schemas.py — Data Schemas](#appmodelsschemaspython--data-schemas)
+- [Module Reference](#module-reference)
 - [Retry Logic](#retry-logic)
 - [SQL Safety Rules](#sql-safety-rules)
-- [Filter Recommendation Logic](#filter-recommendation-logic)
+- [Caching Strategy](#caching-strategy)
 - [Conversation Memory](#conversation-memory)
-- [Performance Optimizations](#performance-optimizations)
 - [Dependencies](#dependencies)
 
 ---
 
 ## Overview
 
-The KRA AI Report Builder Agent sits alongside your existing KRA application (port 8000) and exposes a single HTTP endpoint on **port 8001**. A user submits a question in plain English; the agent:
+The KRA AI Report Builder Agent exposes a REST + WebSocket API on **port 8001**. A user submits a plain-English question; the agent:
 
-1. Loads the live database schema and conversation history
-2. Builds a structured prompt and sends it to **GPT-4o-mini**
-3. Cleans and validates the generated SQL (safety check + LIMIT enforcement)
-4. Executes the query against MySQL (`vthink_kra` on `192.168.2.8`)
-5. Returns structured results with `dimensions` and `recommended_column_filters` for frontend drill-down
+1. **Classifies intent** — is the question KRA-related? Does it have enough detail?
+2. **Clarifies if needed** — asks one focused follow-up question (max 2 rounds)
+3. **Generates SQL** — builds a prompt, calls GPT-4o-mini, cleans and validates the result
+4. **Executes against MySQL** — runs the validated query on `vthink_kra`
+5. **Caches the SQL in Redis** — enables instant refresh without re-calling the LLM
+6. **Returns structured results** — with `dimensions` and `recommended_column_filters` for frontend dashboards
 
-If the generated SQL fails validation or execution, the agent automatically retries up to 2 times, feeding the error back to GPT so it can self-correct.
+---
+
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| Intent Detection | Classifies every query into off_topic / incomplete / clear before SQL generation |
+| Clarification Flow | Asks focused follow-up questions; forces SQL generation after 2 rounds |
+| LLM SQL Generation | GPT-4o-mini converts natural language to validated MySQL SELECT |
+| Self-Healing Retries | Feeds validation/execution errors back to GPT for up to 2 self-corrections |
+| In-Memory Query Cache | LRU cache with TTL — repeat queries return instantly, no LLM call |
+| Redis SQL Cache | Post-validation SQL cached per session — refresh bypasses entire LLM pipeline |
+| HTTP Refresh | `GET /report/refresh/{session_id}` — re-executes cached SQL, no LLM cost |
+| WebSocket Streaming | `WS /report/stream/{session_id}` — auto-refreshes data every N seconds |
+| Conversation Memory | Per-user Q&A history stored in MySQL, injected into future prompts |
+| Filter Recommender | Automatically suggests which columns are suitable for frontend filter dropdowns |
+| SQL Safety Gate | 19 compiled patterns block any non-SELECT operation before execution |
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        FastAPI (port 8001)                        │
-│                      POST /api/v1/query                           │
-└───────────────────────────────┬──────────────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     LangGraph StateGraph                          │
-│                                                                    │
-│  load_context → prompt_builder → llm → sql_agent → sql_validator  │
-│                      ▲                                    │        │
-│                      │          ┌────────────────────────┤        │
-│                      │          ▼                         ▼        │
-│                 retry_loop   execute                    stop       │
-│                      ▲          │                         │        │
-│                      │          ▼                         ▼        │
-│                      │   execution_engine          error_handler   │
-│                      │          │                                  │
-│                      │    ┌─────┴──────┐                           │
-│                      │    ▼            ▼                           │
-│                      └─retry      result_formatter                 │
-│                                        │                           │
-│                                   memory_store → END               │
-└──────────────────────────────────────────────────────────────────┘
-                                │
-                    ┌───────────┼───────────┐
-                    ▼           ▼           ▼
-               MySQL DB    GPT-4o-mini   Memory
-              (vthink_kra)              (MySQL table +
-                                         in-memory deque)
+┌─────────────────────────────────────────────────────────────────────┐
+│                        FastAPI  (port 8001)                          │
+│                                                                       │
+│  POST /api/v1/query              ← Legacy single-step endpoint        │
+│  POST /api/v1/report/generate    ← Intent-aware generation            │
+│  POST /api/v1/report/clarify     ← Submit answer to follow-up         │
+│  GET  /api/v1/report/refresh/:id ← Re-execute cached SQL (no LLM)    │
+│  WS   /api/v1/report/stream/:id  ← Auto-refresh via WebSocket         │
+│  GET  /api/v1/cache/stats        ← Query cache metrics                │
+│  DELETE /api/v1/cache            ← Flush query cache                  │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │
+          ┌────────────▼────────────┐
+          │   LangGraph StateGraph   │    ← Main Pipeline
+          │                          │
+          │  load_context            │
+          │       │                  │
+          │  cache_lookup ──hit──► memory_store ─► END
+          │       │ miss             │
+          │  intent_detector         │
+          │  ├─ off_topic ─────────► END
+          │  ├─ incomplete ────────► END  (returns follow_up_question)
+          │  └─ clear               │
+          │       │                  │
+          │  prompt_builder          │
+          │  llm  (GPT-4o-mini)      │
+          │  sql_agent               │
+          │  sql_validator           │
+          │  ├─ valid ──► cache_write (Redis) ──► execution_engine
+          │  ├─ invalid ──────────── retry ──► prompt_builder
+          │  └─ unsafe ──────────► error_handler ─► END
+          │       │                  │
+          │  result_formatter        │
+          │  cache_store (LRU)       │
+          │  memory_store ─────────► END
+          └──────────────────────────┘
+
+          ┌────────────────────────────┐
+          │  Refresh Graph (no LLM)    │
+          │                            │
+          │  refresh_execution_node    │  ← Redis read → MySQL execute
+          │  response_node ──────────► END
+          └────────────────────────────┘
+
+                    ┌──────────┬──────────┬──────────┐
+                    │          │          │          │
+               MySQL DB   GPT-4o-mini  Redis    In-Memory
+              (vthink_kra)             (SQL      (LRU Cache +
+                                        Cache)    Session Store)
 ```
 
 ---
 
-## Pipeline Flow
+## Pipeline Flows
 
-A single request passes through up to 10 nodes in sequence:
+### Flow 1 — Fresh Query (cache miss, clear intent)
 
 ```
-Step 1  load_context           Load DB schema + user conversation history
-Step 2  prompt_builder         Assemble full LLM prompt (schema + rules + memory + query)
-Step 3  llm                    Call GPT-4o-mini → get SQL + explanation
-Step 4  sql_agent              Strip markdown fences, normalize whitespace/quotes
-Step 5  sql_validator          Safety check (19 patterns) + enforce LIMIT
-         ├─ VALID  ──────────► Step 7
-         ├─ INVALID (retry) ─► Step 6a → back to Step 2
-         └─ UNSAFE (stop) ──► Step 10
-
-Step 6a increment_retry_validation   Set retry feedback message (validation failure)
-Step 6b increment_retry_execution    Set retry feedback message (execution failure)
-
-Step 7  execution_engine       Run validated SQL on MySQL
-         ├─ success ──────────► Step 8
-         ├─ error (retry) ───► Step 6b → back to Step 2
-         └─ error (exhausted) ► Step 10
-
-Step 8  result_formatter       Classify dimensions, call filter recommender
-Step 9  memory_store           Save Q&A interaction to conversation_history table
-Step 10 error_handler          Build user-friendly error response
+load_context → cache_lookup(MISS) → intent_detector(clear)
+→ prompt_builder → llm → sql_agent → sql_validator(valid)
+→ cache_write(Redis) → execution_engine → result_formatter
+→ cache_store(LRU) → memory_store → END
 ```
 
-**Maximum retries:** 2 (shared across validation and execution failures). On each retry, the failed SQL and error message are injected back into the prompt so GPT-4o-mini can self-correct.
+### Flow 2 — Incomplete Query (clarification needed)
+
+```
+load_context → cache_lookup(MISS) → intent_detector(incomplete)
+→ clarification_node → END
+  [returns: follow_up_question + follow_up_options + session_id]
+
+POST /report/clarify  (user answers the question)
+→ merged_query → intent_detector → ...
+  Round 1: may ask another question
+  Round 2: FORCED to Track C (clear) → SQL generation proceeds
+```
+
+### Flow 3 — Off-Topic Query
+
+```
+load_context → cache_lookup(MISS) → intent_detector(off_topic)
+→ off_topic_node → END
+  [returns: polite message + role-appropriate example queries]
+```
+
+### Flow 4 — Repeat Query (LRU cache hit)
+
+```
+load_context → cache_lookup(HIT) → memory_store → END
+  [returns: cached result instantly, cache_hit=true, no LLM call]
+```
+
+### Flow 5 — Refresh (Redis SQL cache)
+
+```
+GET /report/refresh/{session_id}
+→ refresh_execution_node:
+    1. Redis GET sql_cache:{session_id}
+    2. Validate user_id matches session owner
+    3. MySQL execute(cached_sql)
+    4. response_node formats result
+  [NO intent_detector, NO prompt_builder, NO LLM, NO sql_validator]
+```
+
+### Flow 6 — Validation Retry
+
+```
+... → sql_validator(invalid) → increment_retry_validation
+→ prompt_builder (with error feedback) → llm → sql_agent → sql_validator
+  [repeats up to MAX_RETRY_COUNT=2 times, then routes to error_handler]
+```
 
 ---
 
 ## Project Structure
 
 ```
-backend/
-├── main.py                              ← FastAPI app + startup lifespan
-├── .env                                 ← Secrets (DB password, OpenAI key)
-├── .gitignore                           ← Prevents .env from being committed
-├── requirements.txt                     ← Python dependencies
-└── app/
-    ├── config.py                        ← All settings loaded from .env
-    ├── graph/
-    │   ├── state.py                     ← AgentState TypedDict (shared pipeline data)
-    │   ├── workflow.py                  ← LangGraph graph definition + compiler
-    │   └── nodes.py                     ← All 10 node functions + edge routers
-    ├── agents/
-    │   ├── prompt_builder.py            ← Assembles the LLM prompt string
-    │   ├── llm_agent.py                 ← Calls GPT-4o-mini, parses JSON response
-    │   └── sql_agent.py                 ← Cleans raw LLM SQL output
-    ├── validators/
-    │   └── sql_validator.py             ← SQL safety checker + LIMIT enforcer
-    ├── db/
-    │   ├── connection.py                ← SQLAlchemy connection pool + execute_query()
-    │   └── schema_manager.py            ← Reads live DB schema for LLM context
-    ├── memory/
-    │   └── conversation_memory.py       ← Per-user Q&A history (MySQL + fallback deque)
-    ├── services/
-    │   ├── report_service.py            ← Thin wrapper calling run_report_agent()
-    │   └── filter_recommender.py        ← Picks filterable column names from result
-    ├── api/
-    │   └── routes.py                    ← FastAPI router with POST /query endpoint
-    └── models/
-        └── schemas.py                   ← Pydantic request/response models
+Report Builder Agent/
+├── README.md
+└── backend/
+    ├── main.py                          ← FastAPI app, startup lifespan, CORS
+    ├── .env                             ← Secrets (DB, OpenAI, Redis)
+    ├── requirements.txt                 ← Python dependencies
+    └── app/
+        ├── config.py                    ← All settings loaded from .env
+        ├── api/
+        │   └── routes.py               ← All endpoints + Pydantic models
+        ├── graph/
+        │   ├── state.py                 ← AgentState TypedDict (pipeline whiteboard)
+        │   ├── workflow.py              ← LangGraph graph definitions + entry points
+        │   └── nodes.py                 ← All node functions + edge routers
+        ├── agents/
+        │   ├── intent_agent.py          ← Classifies query intent via LLM
+        │   ├── prompt_builder.py        ← Assembles the SQL-generation prompt
+        │   ├── llm_agent.py             ← GPT-4o-mini client (lazy init)
+        │   └── sql_agent.py             ← Cleans raw LLM SQL output
+        ├── validators/
+        │   └── sql_validator.py         ← Safety gate + LIMIT enforcer
+        ├── db/
+        │   ├── connection.py            ← SQLAlchemy connection pool
+        │   └── schema_manager.py        ← Reads live DB schema for LLM context
+        ├── cache/
+        │   ├── query_cache.py           ← In-memory LRU cache with TTL
+        │   └── redis_cache.py           ← Redis SQL cache (fallback to memory)
+        ├── memory/
+        │   └── conversation_memory.py   ← Per-user Q&A history
+        ├── services/
+        │   ├── report_service.py        ← Thin wrapper for legacy /query endpoint
+        │   ├── session_store.py         ← In-memory session store (30-min TTL)
+        │   └── filter_recommender.py    ← Picks filterable columns from results
+        └── models/
+            └── schemas.py               ← (reserved — models defined in routes.py)
 ```
 
 ---
@@ -162,8 +218,9 @@ backend/
 ## Prerequisites
 
 - Python 3.10+
-- MySQL 8.x (`vthink_kra` database on `192.168.2.8`)
+- MySQL 8.x — `vthink_kra` database on `192.168.2.8`
 - OpenAI API key (GPT-4o-mini access)
+- Redis (optional) — enables refresh/stream; falls back to in-memory if unavailable
 - Network access to `192.168.2.8:3306`
 
 ---
@@ -178,7 +235,6 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Linux/macOS
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -186,34 +242,51 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Create a `.env` file in the `backend/` directory:
+All configuration lives in `backend/.env`:
 
 ```env
-# Database
+# ── Database ──────────────────────────────────────────
 DB_HOST=192.168.2.8
 DB_PORT=3306
 DB_USER=krauser
 DB_PASSWORD=vThink135#
 DB_NAME=vthink_kra
+DB_POOL_SIZE=10
+DB_MAX_OVERFLOW=20
+DB_ECHO=false
 
-# OpenAI
+# ── OpenAI ────────────────────────────────────────────
 OPENAI_API_KEY=sk-...
-
-# Optional tuning (these are the defaults)
 LLM_MODEL=gpt-4o-mini
 LLM_MAX_TOKENS=2000
 LLM_TEMPERATURE=0
+
+# ── Query Limits ──────────────────────────────────────
+MAX_QUERY_TIMEOUT=30
 MAX_RESULT_ROWS=1000
 DEFAULT_RESULT_LIMIT=100
 MAX_RETRY_COUNT=2
+
+# ── Memory ────────────────────────────────────────────
 MAX_CONVERSATION_HISTORY=10
-MAX_QUERY_TIMEOUT=30
+
+# ── Logging ───────────────────────────────────────────
 LOG_LEVEL=INFO
+DEBUG_MODE=false
+
+# ── Redis (optional) ──────────────────────────────────
+# Leave empty to use in-memory fallback (dev mode)
+# Use rediss:// (double-s) for TLS (e.g. Upstash)
+REDIS_URL=redis://localhost:6379/0
+
+# ── Cache / Stream ────────────────────────────────────
+CACHE_TTL_SECONDS=3600
+CACHE_MAX_SIZE=500
+STREAM_CACHE_TTL_SECONDS=3600
+STREAM_REFRESH_INTERVAL_SECONDS=30
 ```
 
-All settings have sensible defaults. Only `OPENAI_API_KEY` is required (without it, LLM calls will fail).
-
-> **Note:** The `#` character in `vThink135#` is handled automatically — `config.py` URL-encodes it with `quote_plus` so it does not break the SQLAlchemy connection string.
+> The `#` in `vThink135#` is automatically URL-encoded by `config.py` — no manual escaping needed.
 
 ---
 
@@ -222,596 +295,547 @@ All settings have sensible defaults. Only `OPENAI_API_KEY` is required (without 
 ```bash
 cd backend
 
-# Development (with auto-reload)
+# Development (hot-reload on file change)
 python main.py
 
 # Production
 python -m uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
-On startup the server will:
-1. Verify the MySQL connection
-2. Load the full `vthink_kra` schema into memory (2 batch queries)
-3. Warn if `OPENAI_API_KEY` is missing
-4. Print the Swagger UI URL: `http://localhost:8001/docs`
+**Startup log (healthy):**
+```
+INFO  app.db.connection    Database engine initialised
+INFO  main                 KRA Report Builder Agent starting up...
+INFO  main                 Database connection OK
+INFO  app.db.schema_manager Schema refreshed: 42 tables
+INFO  main                 Schema loaded on startup
+INFO  main                 Redis connection OK          ← or warning if unavailable
+INFO  main                 Startup complete. Swagger UI: http://localhost:8001/docs
+```
+
+**Swagger UI:** [http://localhost:8001/docs](http://localhost:8001/docs)
 
 ---
 
 ## API Reference
 
-### `POST /api/v1/query`
+### `POST /api/v1/report/generate` — Intent-Aware Report Generation
 
-Convert a plain-English question to SQL, execute it, and return results.
+The primary endpoint. Returns one of three statuses:
 
 **Request:**
 ```json
 {
-  "query": "Show all active KRAs with employee names and current progress"
+  "query": "Show my KRA goals for Q1 2025",
+  "user_id": "user_42",
+  "user_role": "employee"
 }
 ```
 
-**Response:**
+`user_role` options: `employee` | `lead` | `manager` | `hr`
+
+**Response — `off_topic`** (query has no KRA context):
 ```json
 {
-  "sql_query": "SELECT e.name, k.kra_title, k.progress FROM employees e JOIN kras k ON e.id = k.employee_id WHERE e.is_active = 1 LIMIT 100",
-  "explanation": "This query fetches active employees along with their KRA titles and current progress.",
-  "dimensions": ["name", "kra_title"],
-  "recommended_column_filters": ["designation", "stream", "is_active"],
-  "data": [
-    { "name": "John Doe", "kra_title": "Q1 Revenue Target", "progress": 75 },
-    ...
-  ],
-  "row_count": 45,
+  "status": "off_topic",
+  "message": "I don't have information on greetings. I'm built to generate reports from the KRA system.\n\n• Show my KRA goals for Q1 2025 with completion percentage\n• ...",
+  "suggestions": ["Show my KRA goals for Q1 2025...", "..."],
+  "session_id": "sess_abc123"
+}
+```
+
+**Response — `clarification_needed`** (query is KRA-related but missing key info):
+```json
+{
+  "status": "clarification_needed",
+  "follow_up_question": "Which time period do you want to see your goals for?",
+  "follow_up_options": ["Q1 2025", "Q2 2025", "Q3 2025", "Q4 2024", "Full year 2025"],
+  "clarification_round": 0,
+  "original_prompt": "show my goals",
+  "session_id": "sess_abc123"
+}
+```
+
+**Response — `success`**:
+```json
+{
+  "status": "success",
+  "enriched_prompt": "Show my KRA goals for Q1 2025 with completion percentage.",
+  "sql_query": "SELECT gm.goal_id, gm.goal_desc, ... FROM master_goals gm ... LIMIT 100",
+  "explanation": "This query retrieves KRA goals for Q1 2025 with completion percentage.",
+  "dimensions": ["goal_id", "goal_desc"],
+  "recommended_column_filters": ["completion_percentage"],
+  "data": [{"goal_id": 1, "goal_desc": "...", "completion_percentage": 75.0}],
+  "row_count": 12,
   "execution_time": 0.043,
-  "error": null
+  "cache_hit": false,
+  "session_id": "sess_abc123"
 }
 ```
 
-**Error response (when SQL generation or execution fails):**
+---
+
+### `POST /api/v1/report/clarify` — Submit Clarification Answer
+
+Called when `/report/generate` returns `clarification_needed`. Maximum 2 rounds — round 2 always forces SQL generation.
+
+**Request:**
 ```json
 {
-  "sql_query": "",
-  "explanation": "",
-  "dimensions": [],
-  "recommended_column_filters": [],
-  "data": [],
-  "row_count": 0,
-  "execution_time": 0.0,
-  "error": "SQL execution failed: Table 'xyz' doesn't exist — The referenced table may not exist. Try refreshing the schema via POST /api/v1/refresh-schema."
+  "session_id": "sess_abc123",
+  "user_answer": "Q1 2025",
+  "user_id": "user_42",
+  "user_role": "employee"
 }
 ```
 
-**Response fields:**
+Returns the same response structure as `/report/generate` (`off_topic` / `clarification_needed` / `success`).
 
-| Field | Type | Description |
-|---|---|---|
-| `sql_query` | string | The MySQL SELECT statement that was executed |
-| `explanation` | string | One-sentence description of what the query returns |
-| `dimensions` | List[str] | Non-aggregate columns (suitable for grouping/row display) |
-| `recommended_column_filters` | List[str] | Columns suitable for frontend filter dropdowns |
-| `data` | List[object] | Result rows as JSON objects keyed by column name |
-| `row_count` | int | Number of rows returned |
-| `execution_time` | float | MySQL query execution time in seconds |
-| `error` | string or null | Error message if the query failed; null on success |
-
-**Example queries to try in Swagger:**
-- `Show all active KRAs with employee names and current progress`
-- `List employees grouped by designation`
-- `How many employees are there per stream?`
-- `Show employees who joined in 2024`
-- `Show all goals and their completion status`
-
-**Swagger UI:** `http://localhost:8001/docs`
+**Error:** `404` if `session_id` is not found or has expired (30-min TTL).
 
 ---
 
-## Component Reference
+### `GET /api/v1/report/refresh/{session_id}` — Live Refresh (No LLM)
 
-### [main.py](backend/main.py) — Entry Point
+Re-executes the cached SQL directly against MySQL. No LLM, no prompt building, no SQL validation.
 
-The FastAPI application entry point. Responsibilities:
+**Query params:** `user_id` (required), `user_role` (optional, default `employee`)
 
-- Loads `.env` before any other imports (so `config.py` sees the environment variables)
-- Configures structured logging (`%(asctime)s %(levelname)s %(name)s %(message)s`)
-- Defines the `lifespan` async context manager that runs on startup:
-  - Calls `db_manager.health_check()` to verify the DB is reachable
-  - Calls `schema_manager.refresh_schema()` to load all table/column metadata into memory
-  - Warns if `OPENAI_API_KEY` is not set
-- Registers CORS middleware (allows all origins — restrict in production)
-- Mounts the API router at `/api/v1`
-- Runs uvicorn on port **8001** (your existing KRA app occupies 8000)
-
----
-
-### [app/config.py](backend/app/config.py) — Settings
-
-Centralizes all configuration in a single `settings` object. Every other module imports from here instead of calling `os.getenv()` directly.
-
-The DB password `vThink135#` contains a `#` character which would break a URL string. `_build_db_url()` uses `urllib.parse.quote_plus` to encode it as `%23` before inserting it into the SQLAlchemy connection URL.
-
-| Setting | Default | Description |
-|---|---|---|
-| `DB_HOST` | `192.168.2.8` | MySQL server IP |
-| `DB_PORT` | `3306` | MySQL port |
-| `DB_USER` | `krauser` | DB username |
-| `DB_PASSWORD` | `vThink135#` | DB password (URL-encoded internally) |
-| `DB_NAME` | `vthink_kra` | Database name |
-| `DB_POOL_SIZE` | `10` | Persistent connection pool size |
-| `DB_MAX_OVERFLOW` | `20` | Extra connections allowed under load |
-| `OPENAI_API_KEY` | — | Required for LLM calls |
-| `LLM_MODEL` | `gpt-4o-mini` | OpenAI model to use |
-| `LLM_MAX_TOKENS` | `2000` | Max tokens in LLM response |
-| `LLM_TEMPERATURE` | `0` | 0 = deterministic SQL output |
-| `MAX_RESULT_ROWS` | `1000` | Hard cap on rows returned |
-| `DEFAULT_RESULT_LIMIT` | `100` | LIMIT added if query has none |
-| `MAX_RETRY_COUNT` | `2` | Max retries on SQL failure |
-| `MAX_CONVERSATION_HISTORY` | `10` | Past interactions loaded into prompt |
-| `MAX_QUERY_TIMEOUT` | `30` | MySQL `MAX_EXECUTION_TIME` in seconds |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-
----
-
-### [app/graph/state.py](backend/app/graph/state.py) — Shared State
-
-`AgentState` is a `TypedDict` (with `total=False`) that acts as the shared whiteboard passed through all pipeline nodes. Each node reads what it needs and writes what it produces.
-
-| Field | Type | Written by | Read by |
-|---|---|---|---|
-| `user_id` | str | routes.py | all nodes (for logging) |
-| `user_query` | str | routes.py | prompt_builder |
-| `schema` | str | load_context | prompt_builder |
-| `memory_context` | str | load_context | prompt_builder |
-| `prompt` | str | prompt_builder | llm |
-| `llm_response` | dict | llm | sql_agent, result_formatter |
-| `refined_sql` | str | sql_agent, sql_validator | execution_engine, result_formatter |
-| `validation_status` | str | sql_validator | route_after_validation |
-| `validation_message` | str | sql_validator | increment_retry_validation, error_handler |
-| `execution_result` | dict | execution_engine | result_formatter, route_after_execution |
-| `execution_time` | float | execution_engine | result_formatter |
-| `formatted_result` | dict | result_formatter, error_handler | routes.py (final response) |
-| `retry_count` | int | increment_retry nodes | routers (stop if exhausted) |
-| `retry_feedback` | str | increment_retry nodes | prompt_builder |
-| `steps` | list | every node | routes.py (debug mode only) |
-
----
-
-### [app/graph/workflow.py](backend/app/graph/workflow.py) — Pipeline Definition
-
-Builds and compiles the LangGraph `StateGraph` once at module import. The compiled graph (`_workflow`) is reused for every request — zero compilation overhead per call.
-
-**Graph topology:**
-
-```python
-load_context → prompt_builder → llm → sql_agent → sql_validator
-                    ▲                                    │
-                    │         ┌─────────────────────────┤
-               (retry)        ▼                 ▼        ▼
-                    │    increment_retry    execute     stop
-                    │         │                │
-                    └─────────┘         execution_engine
-                                               │
-                               ┌───────────────┤
-                               ▼       ▼        ▼
-                          increment  format    stop
-                          _retry         │
-                               │   result_formatter
-                               │         │
-                               │    memory_store → END
-                               │
-                           error_handler → END
+**Success response:**
+```json
+{
+  "status": "success",
+  "explanation": "Live data refresh",
+  "dimensions": ["goal_id", "goal_desc"],
+  "data": [...],
+  "row_count": 12,
+  "execution_time": 0.018,
+  "refresh_mode": true,
+  "refreshed_at": "2026-05-12T06:51:43.883766+00:00",
+  "session_id": "sess_abc123"
+}
 ```
 
-`run_report_agent()` is the async entry point called by `report_service`. It initializes the full `AgentState` with default values and calls `_workflow.ainvoke(initial)`.
+**Error responses:**
+
+| HTTP | detail | Cause |
+|------|--------|-------|
+| `404` | `SESSION_EXPIRED` | session not found / Redis TTL expired |
+| `403` | `ACCESS_DENIED` | `user_id` does not match session owner |
+| `409` | `SCHEMA_CHANGED` | `OperationalError` — table/column was modified |
 
 ---
 
-### [app/graph/nodes.py](backend/app/graph/nodes.py) — Pipeline Nodes
+### `WS /api/v1/report/stream/{session_id}` — WebSocket Auto-Refresh
 
-Contains all 10 node functions. Each function signature is `(state: AgentState) -> Dict[str, Any]` — it reads from state and returns a dict of keys to update.
+Connects via WebSocket and pushes a fresh result every N seconds (default: `STREAM_REFRESH_INTERVAL_SECONDS=30`).
 
-#### Node 1 — `load_context_node`
-Loads two things into state:
-- **Schema string** from `schema_manager.get_schema_string()` — formatted table/column descriptions for the LLM prompt
-- **Memory context** from `memory_manager.get_context_string(user_id)` — last N conversation turns
+**Connect URL:**
+```
+ws://localhost:8001/api/v1/report/stream/sess_abc123?user_id=user_42&user_role=employee&interval=10
+```
 
-#### Node 2 — `prompt_builder_node`
-Calls `prompt_builder.build_prompt()` to assemble the complete LLM input string. On a retry, `state["retry_feedback"]` is non-empty and gets appended as a suffix to the prompt, telling GPT what went wrong.
-
-#### Node 3 — `llm_node`
-Calls `llm_agent.generate_sql(prompt)`. Returns a dict with `sql_query`, `explanation`, `columns`, `filters`. On failure, sets `error` key.
-
-#### Node 4 — `sql_agent_node`
-Passes the raw `llm_response["sql_query"]` through `sql_refinement_agent.refine()` to produce a clean SQL string.
-
-#### Node 5 — `sql_validator_node`
-Calls `sql_validator.validate(sql, user_id)`. Writes `validation_status` (`valid` / `invalid` / `unsafe`) and `validation_message` to state. Also writes the possibly-modified SQL (with LIMIT enforced).
-
-#### Nodes 6a/6b — `increment_retry_validation_node` / `increment_retry_execution_node`
-Increment `retry_count` by 1. Build a `retry_feedback` string describing what failed. This feedback is read by Node 2 on the next loop to give GPT the context it needs to generate better SQL.
-
-#### Node 7 — `execution_engine_node`
-Calls `db_manager.execute_query(sql)`. On success, writes `execution_result` with `rows` (List[dict]) and `columns` (List[str]). On failure, writes the exception message to `execution_result["error"]`.
-
-#### Node 8 — `result_formatter_node`
-Builds the final `formatted_result` dict:
-- **`dimensions`**: columns that do not contain metric keywords (`count`, `sum`, `total`, `avg`, `revenue`, etc.) — uses a `frozenset` for O(1) membership checks
-- **`recommended_column_filters`**: calls `filter_recommender.recommended_column_filters(rows, columns)`
-- Adds `sql_query`, `explanation`, `data`, `row_count`, `execution_time`
-
-#### Node 9 — `memory_store_node`
-Saves the Q&A pair to `conversation_history` so future requests from the same user benefit from context.
-
-#### Node 10 — `error_handler_node`
-Builds an error-shaped `formatted_result`. Calls `_suggest(error_message)` to map error patterns to user-friendly guidance:
-
-| Error contains | Suggestion |
-|---|---|
-| `unsafe`, `forbidden` | Only SELECT queries are allowed |
-| `user_id`, `rbac` | Access control prevented this query |
-| `cartesian` | Add explicit JOIN conditions |
-| `table` + `doesn't exist` | Refresh schema via POST /api/v1/refresh-schema |
-| `timeout` | Add more specific filters |
-| anything else | Please rephrase your query |
-
-#### Edge Routers
-
-`route_after_validation(state)` — decides what happens after sql_validator:
-- `"execute"` if `validation_status == "valid"`
-- `"stop"` if `validation_status == "unsafe"` (or retry budget exhausted)
-- `"retry"` if `validation_status == "invalid"` and retries remain
-
-`route_after_execution(state)` — decides what happens after execution_engine:
-- `"format"` if no execution error
-- `"stop"` if error and retry budget exhausted
-- `"retry"` if error and retries remain
+- Each message is the same JSON structure as `/report/refresh`
+- Server closes with code `1008` (Policy Violation) on `SESSION_EXPIRED`, `ACCESS_DENIED`, or `SCHEMA_CHANGED`
+- Client disconnect is handled cleanly — no dangling loops
 
 ---
 
-### [app/agents/prompt_builder.py](backend/app/agents/prompt_builder.py) — Prompt Assembly
+### `POST /api/v1/query` — Legacy Endpoint
 
-Assembles the complete prompt sent to GPT-4o-mini. The prompt has two parts:
-
-**System prompt template** includes:
-- Full DB schema (table names, column names, types, PK/FK markers)
-- Business rules:
-  - Only generate SELECT statements
-  - Default LIMIT 100, maximum LIMIT 1000
-  - Use explicit JOIN ... ON ... syntax (no comma-separated FROM tables)
-  - Column names must exactly match the schema
-  - No subqueries in FROM clause without aliases
-- Output format instruction: respond with JSON only — `{ "sql_query": "...", "explanation": "...", "columns": [...], "filters": [...] }`
-- Memory context (last N Q&A turns from this user)
-
-**Retry suffix template** (appended on retries):
-- States the validation or execution error message
-- Includes the rejected SQL
-- Instructs GPT to fix the specific issue
+Single-step endpoint (no explicit intent detection, uses same LangGraph pipeline). Returns `status`, `session_id`, and all standard result fields. Preserved for backwards compatibility.
 
 ---
 
-### [app/agents/llm_agent.py](backend/app/agents/llm_agent.py) — GPT-4o-mini Client
+### `GET /api/v1/cache/stats` — Query Cache Metrics
 
-Wraps `langchain_openai.ChatOpenAI` with lazy initialization.
+```json
+{
+  "size": 3,
+  "max_size": 500,
+  "ttl_seconds": 3600,
+  "hits": 7,
+  "misses": 12,
+  "hit_rate": 0.3684
+}
+```
 
-**Lazy init:** `_llm` starts as `None`. On the first `generate_sql()` call, `_get_llm()` creates the `ChatOpenAI` instance. This prevents an `OpenAIError: api_key must be set` crash at import time (before `.env` is loaded).
+### `DELETE /api/v1/cache` — Flush Query Cache
 
-**JSON extraction:** The LLM is instructed to respond with JSON only, but sometimes includes surrounding text. The agent uses `re.search(r"\{[\s\S]*\}", raw)` to extract the JSON object regardless of surrounding content.
-
-**Returns a dict with:**
-- `sql_query` — the raw SQL string
-- `explanation` — one-sentence description
-- `columns` — list of column names in the result
-- `filters` — list of suggested filter columns (used for reference; `filter_recommender` makes the final decision)
-- `error` — set on any exception
+```json
+{ "cleared": 3, "message": "Removed 3 cached entries" }
+```
 
 ---
 
-### [app/agents/sql_agent.py](backend/app/agents/sql_agent.py) — SQL Cleaner
+## Module Reference
 
-Lightweight string normalizer applied before validation:
+### `main.py` — Entry Point
+
+- Loads `.env` before all imports
+- `lifespan` startup: verifies DB, loads schema (42 tables), checks Redis
+- CORS: `allow_origins=["*"]` — restrict to frontend origin in production
+- Mounts router at `/api/v1`, runs on port **8001**
+
+---
+
+### `app/config.py` — Settings
+
+Centralizes all settings in a single `settings` singleton. Every module imports `from app.config import settings` instead of calling `os.getenv()` directly. The DB password is URL-encoded with `urllib.parse.quote_plus` so special characters (`#`, `@`, etc.) don't break the SQLAlchemy connection URL.
+
+---
+
+### `app/graph/state.py` — Shared Pipeline State
+
+`AgentState` is a `TypedDict(total=False)` — the shared whiteboard passed through all nodes. Every field is optional so partial updates work cleanly.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `user_id`, `user_query`, `user_role` | str | Request inputs |
+| `session_id` | str | Links pipeline run to Redis SQL cache |
+| `schema`, `memory_context` | str | Loaded by `load_context_node` |
+| `intent_track` | str | `off_topic` / `incomplete` / `clear` |
+| `clarification_round` | int | 0→1→2; at 2 always forces SQL generation |
+| `follow_up_question`, `follow_up_options` | str/list | Returned on `clarification_needed` |
+| `enriched_prompt` | str | Intent-rewritten query used instead of raw input |
+| `prompt` | str | Full assembled LLM prompt |
+| `refined_sql` | str | Cleaned + validated SQL |
+| `validation_status` | str | `valid` / `invalid` / `unsafe` |
+| `execution_result` | dict | `{rows, columns, error}` |
+| `formatted_result` | dict | Final API response payload |
+| `retry_count`, `retry_feedback` | int/str | Self-healing retry state |
+| `cache_hit`, `cache_key` | bool/str | LRU query cache state |
+| `refresh_mode`, `refreshed_at` | bool/str | Set by refresh graph |
+
+---
+
+### `app/graph/workflow.py` — Graph Definitions
+
+Builds and compiles two LangGraph `StateGraph` objects **once at module import** — zero compilation cost per request.
+
+**`_workflow`** — main pipeline (all features)
+**`_refresh_workflow`** — refresh only (`refresh_execution → response → END`)
+
+**Three entry points:**
+
+| Function | Used by | Description |
+|----------|---------|-------------|
+| `run_report_agent()` | `/query` (legacy) | Full pipeline, no explicit user_role |
+| `run_intent_report()` | `/report/generate`, `/report/clarify` | Intent-aware, accepts user_role + clarification state |
+| `run_refresh_agent()` | `/report/refresh`, `/report/stream` | Refresh-only, no LLM |
+
+---
+
+### `app/graph/nodes.py` — All Pipeline Nodes
+
+Each node has the signature `(state: AgentState) -> Dict[str, Any]`.
+
+| Node | Description |
+|------|-------------|
+| `load_context_node` | Loads DB schema string + user conversation history |
+| `cache_lookup_node` | Checks in-memory LRU cache; on hit, skips entire pipeline |
+| `intent_detector_node` | Calls `IntentDetectorAgent.classify()` → sets `intent_track` |
+| `off_topic_node` | Builds polite redirect response with role-appropriate examples |
+| `clarification_node` | Builds `clarification_needed` response with follow-up question |
+| `prompt_builder_node` | Assembles full LLM prompt; uses `enriched_prompt` over raw query |
+| `llm_node` | Calls GPT-4o-mini, stores `llm_response` |
+| `sql_agent_node` | Strips markdown fences, normalises quotes/whitespace |
+| `sql_validator_node` | Safety gate — 19 patterns + LIMIT enforcement |
+| `cache_write_node` | Saves validated SQL to Redis (non-blocking; falls back to memory) |
+| `execution_engine_node` | Executes SQL on MySQL, stores rows + columns |
+| `result_formatter_node` | Classifies dimensions, runs filter recommender, builds final result |
+| `cache_store_node` | Saves result to LRU query cache |
+| `memory_store_node` | Saves Q&A interaction to `conversation_history` table |
+| `error_handler_node` | Maps error patterns to user-friendly suggestions |
+| `increment_retry_validation_node` | Increments retry count, sets validation error feedback |
+| `increment_retry_execution_node` | Increments retry count, sets execution error feedback |
+| `refresh_execution_node` | Redis read → user validation → MySQL execute (no LLM) |
+| `response_node` | Formats refresh result, adds `refresh_mode=True`, `refreshed_at` |
+
+---
+
+### `app/agents/intent_agent.py` — Intent Classifier
+
+Classifies every query into one of three tracks using GPT-4o-mini:
+
+| Track | Condition | Action |
+|-------|-----------|--------|
+| `off_topic` | No KRA/performance context | Returns polite block message + role examples |
+| `incomplete` | KRA-related but missing key info | Returns one focused follow-up question + 3-5 options |
+| `clear` | Enough info to generate SQL | Returns `enriched_prompt` (precise rewrite) |
+
+**Priority order for missing fields** (asks about the highest priority one):
+1. `metric` — what to measure
+2. `time_period` — quarter or year
+3. `employee_scope` — whose data (never asked for `role=employee`)
+4. `status_filter` — all / completed / in-progress / not-started
+5. `schema_scope` — which module
+6. `comparison_base` — "compare" with one side missing
+
+**Key behaviours:**
+- `clarification_round >= 2` → always forces `track=clear` (hard-enforced in `_parse()`, not just the LLM prompt)
+- Empty message → returns `off_topic` immediately, no LLM call
+- LLM parse failure → falls back to `track=clear` with original query as `enriched_prompt`
+- Schema content is brace-escaped before `.format()` to prevent `KeyError` injection
+
+---
+
+### `app/agents/prompt_builder.py` — Prompt Assembly
+
+Builds the full string sent to GPT-4o-mini:
+
+```
+[System Prompt]
+  - Full DB schema (42 tables, columns, PK/FK markers)
+  - SQL rules: SELECT only, LIMIT 100 default, explicit JOINs, exact column names
+  - Conversation history (last MAX_CONVERSATION_HISTORY turns)
+  - Output format: JSON only { sql_query, explanation, columns, filters }
+
+[Retry Suffix — only on retries]
+  - Previous error message
+  - Rejected SQL
+  - Instruction to fix the specific issue
+
+USER QUERY: <enriched_prompt or raw query>
+```
+
+Schema and memory context are brace-escaped (`{` → `{{`) before calling `str.format()` to prevent `KeyError` crashes when column names or values contain curly braces.
+
+---
+
+### `app/agents/llm_agent.py` — GPT-4o-mini Client
+
+Wraps `langchain_openai.ChatOpenAI` with lazy initialization — the OpenAI client is only created on the first actual request, not at import time.
+
+Uses `re.search(r"\{[\s\S]*\}", raw)` to extract the JSON object from the response, tolerating any surrounding text the LLM might add despite instructions.
+
+---
+
+### `app/agents/sql_agent.py` — SQL Cleaner
+
+Normalizes raw LLM output before validation:
 
 | Transformation | Reason |
-|---|---|
-| Strip ` ```sql ` and ` ``` ` | GPT often wraps SQL in markdown code fences |
-| Replace `'` `'` → `'` | Smart/curly quotes break MySQL syntax |
+|----------------|--------|
+| Strip ` ```sql ` / ` ``` ` | GPT wraps SQL in markdown fences |
+| Replace `'` `'` → `'` | Smart quotes break MySQL syntax |
 | Replace `"` `"` → `"` | Smart double-quotes break MySQL syntax |
 | Collapse multiple spaces | Normalize whitespace |
-| Strip trailing `;` | SQLAlchemy adds its own statement terminator |
-
-All patterns use a single pre-compiled `_MULTI_SPACE` regex for repeated spaces. The markdown patterns use `re.sub()` with `re.IGNORECASE`.
+| Strip trailing `;` | SQLAlchemy adds its own terminator |
 
 ---
 
-### [app/validators/sql_validator.py](backend/app/validators/sql_validator.py) — Safety Gate
+### `app/validators/sql_validator.py` — Safety Gate
 
-The most critical security component. Ensures the agent can never modify or destroy data.
+The critical security component. All patterns compiled once at module import.
 
-**19 compiled unsafe patterns** (compiled once at module import):
+**Blocks (UNSAFE — no retry):** `DELETE`, `UPDATE`, `DROP`, `TRUNCATE`, `INSERT`, `ALTER`, `CREATE`, `REPLACE`, `EXEC`, `EXECUTE`, `GRANT`, `REVOKE`, `LOAD DATA`, `OUTFILE`, `INFILE`, `INTO OUTFILE`, `INTO DUMPFILE`, `CALL`, `--` (comments), `;.*SELECT` (stacked queries)
 
-```
-DELETE, UPDATE, DROP, TRUNCATE, INSERT, ALTER, CREATE, REPLACE,
-EXEC, EXECUTE, GRANT, REVOKE, LOAD DATA, OUTFILE, INFILE,
-INTO OUTFILE, INTO DUMPFILE, CALL, --, ;.*SELECT
-```
+**Requires** statement to start with `SELECT` — anything else → UNSAFE.
 
-**Validation steps:**
-1. Clean the SQL (same normalization as sql_agent)
-2. Check all 19 unsafe patterns — any match → `UNSAFE` (no retry)
-3. Verify the statement starts with `SELECT` — anything else → `UNSAFE`
-4. Enforce LIMIT (add `LIMIT 100` if missing; cap any existing LIMIT at 1000)
-5. Check for Cartesian joins (comma-separated tables in FROM without matching ON clauses) → `INVALID` (retry allowed)
+**Auto-fixes:** adds `LIMIT 100` if missing; caps any `LIMIT` above `MAX_RESULT_ROWS=1000`.
 
-**Returns:** `Tuple[ValidationStatus, message, modified_sql]`
-
-**Status meanings:**
-- `VALID` → proceed to execution
-- `INVALID` → recoverable; retry with feedback
-- `UNSAFE` → unrecoverable; stop immediately, return error
+**Detects cartesian joins** (INVALID — retry allowed): comma in FROM clause at depth 0 with fewer ON clauses than JOINs.
 
 ---
 
-### [app/db/connection.py](backend/app/db/connection.py) — MySQL Connection Pool
+### `app/db/connection.py` — MySQL Connection Pool
 
-Creates a SQLAlchemy engine with **QueuePool** configuration:
+SQLAlchemy engine with `QueuePool`:
 
-| Parameter | Value | Description |
-|---|---|---|
-| `pool_size` | 10 | Connections kept alive permanently |
-| `max_overflow` | 20 | Extra connections allowed under peak load |
-| `pool_pre_ping` | True | Tests connections before use (prevents stale connection errors) |
-| `pool_recycle` | 3600 | Recycles connections every hour (avoids MySQL's 8-hour idle timeout) |
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `pool_size` | 10 | Persistent connections |
+| `max_overflow` | 20 | Burst capacity |
+| `pool_pre_ping` | True | Detects stale connections |
+| `pool_recycle` | 3600s | Avoids MySQL 8-hour idle timeout |
 
-`execute_query(sql)`:
-1. Acquires a connection from the pool
-2. Sets `SET SESSION MAX_EXECUTION_TIME = {timeout_ms}` (warns on failure rather than aborting)
-3. Executes the SQL
-4. Returns `(rows: List[dict], columns: List[str])` — rows are dicts keyed by column name
+`execute_query()` sets `MAX_EXECUTION_TIME` per session and returns `(rows: List[dict], columns: List[str])`.
 
 ---
 
-### [app/db/schema_manager.py](backend/app/db/schema_manager.py) — Schema Loader
+### `app/db/schema_manager.py` — Schema Loader
 
-Reads the live database schema and formats it as a text string injected into the LLM prompt.
+Loads the full DB schema in **2 batch queries** at startup (vs. N×3 per-table queries):
 
-**Key optimization — 2 batch queries instead of N+1:**
+- Query 1: all columns across all tables from `information_schema.COLUMNS`
+- Query 2: all foreign keys from `information_schema.KEY_COLUMN_USAGE`
 
-Without optimization: 3 queries per table × 42 tables = **126 queries** at startup.
-
-With optimization: **2 queries total**, regardless of table count:
-
-```sql
--- Query 1: all columns for all tables
-SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY
-FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = 'vthink_kra'
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-
--- Query 2: all foreign keys for all tables
-SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-FROM information_schema.KEY_COLUMN_USAGE
-WHERE TABLE_SCHEMA = 'vthink_kra'
-  AND REFERENCED_TABLE_NAME IS NOT NULL;
+Formats as a text string for the LLM prompt:
 ```
-
-**Schema string format** (what GPT sees in the prompt):
+Table: master_goals
+  goal_id (int NOT NULL) [PK]
+  goal_desc (text)
+  target_date (date)  -- FK→ ...
 ```
-Table: employees
-  - employee_id (INT) [PK]
-  - name (VARCHAR) [NOT NULL]
-  - designation_id (INT) [FK → designations.id]
-  - stream_id (INT) [FK → streams.id]
-  - is_active (TINYINT)
-```
-
-`refresh_schema()` is called at startup and can be called again to pick up schema changes without restarting.
 
 ---
 
-### [app/memory/conversation_memory.py](backend/app/memory/conversation_memory.py) — Conversation History
+### `app/cache/query_cache.py` — In-Memory LRU Cache
 
-Enables follow-up questions by persisting each user's Q&A history.
+TTL-based LRU cache keyed by `md5(user_id:normalized_query)`. Normalized = lowercase + collapsed whitespace, so casing/spacing variations hit the same cache entry.
+
+- Eviction: LRU when `max_size` (default 500) is exceeded
+- TTL: lazy expiry on access (entries are removed when read after expiry)
+- Tracks `hits`, `misses`, `hit_rate` — exposed via `/cache/stats`
+
+---
+
+### `app/cache/redis_cache.py` — Redis SQL Cache
+
+Stores post-validation, RBAC-secured SQL per session for the refresh/stream features.
+
+**Key:** `sql_cache:{session_id}` **TTL:** `STREAM_CACHE_TTL_SECONDS` (default 1 hour)
+
+**Payload:** `{ session_id, user_id, secured_sql, created_at }`
+
+**Automatic fallback:** When Redis is unreachable, silently falls back to an in-memory dict with the same TTL. This means refresh/stream work in development without a Redis server. When Redis becomes available again, the next successful `store()` call switches back automatically.
+
+```
+Redis available    → stores in Redis  (survives restarts, shared across instances)
+Redis unavailable  → stores in memory (dev/test mode, lost on restart)
+```
+
+---
+
+### `app/services/session_store.py` — Session Store
+
+In-memory store for clarification state between `/report/generate` and `/report/clarify` calls.
+
+**Stores per session:** `original_prompt`, `user_id`, `user_role`, `clarification_round`, `prior_followup`
+
+**TTL:** 30 minutes (lazy expiry on `get()`). Session IDs are `sess_{16 hex chars}`.
+
+---
+
+### `app/memory/conversation_memory.py` — Conversation History
+
+Stores each user's Q&A history so future requests have context for follow-up questions ("show only active ones", "sort by score").
 
 **Two-layer storage:**
+1. **MySQL `conversation_history` table** (primary) — created automatically at startup
+2. **In-memory `deque(maxlen=100)` per user** (fallback) — used if MySQL write fails
 
-1. **MySQL `conversation_history` table** (primary):
-   - Created automatically at startup if it doesn't exist
-   - Schema: `id, user_id, role, content, sql_query, created_at`
-   - Index on `(user_id, created_at)` for fast per-user lookups
-   - Stores `role='user'` and `role='assistant'` messages per interaction
-
-2. **In-memory `deque(maxlen=100)` per user** (fallback):
-   - Used if the DB write fails
-   - Bounded at 100 entries per user — prevents unbounded memory growth
-   - Lost on server restart (acceptable — MySQL is the source of truth)
-
-`get_context_string(user_id)` returns the last `MAX_CONVERSATION_HISTORY` (default 10) turns formatted as:
-
-```
-Previous conversations:
-User: Show all employees by designation
-Assistant: This query returns employees grouped by designation. (Returned 87 rows)
-SQL: SELECT designation, COUNT(*) FROM employees GROUP BY designation LIMIT 100
-```
-
-This string is injected into the prompt so GPT understands the conversation context.
+`get_context_string(user_id)` returns the last `MAX_CONVERSATION_HISTORY` turns formatted for injection into the LLM prompt.
 
 ---
 
-### [app/services/filter_recommender.py](backend/app/services/filter_recommender.py) — Filter Recommender
+### `app/services/filter_recommender.py` — Filter Recommender
 
-Analyzes the SQL result and returns a list of column names suitable for frontend filter dropdowns.
+Analyzes result columns and returns which are suitable for frontend filter dropdowns.
 
-**Inclusion logic (any of these passes):**
-- Columns containing date-related keywords: `date`, `time`, `year`, `month`, `day`, `created`, `updated`, `joined`
-- Boolean-style columns starting with `is_` or `has_`
-- Categorical columns with ≤ 50 unique values in the result (low cardinality)
+**Always include:** columns with date keywords (`date`, `_at`, `time`, `created`...) · boolean-prefix columns (`is_`, `has_`, `can_`, `flag_`...)
 
-**Exclusion logic (these are always skipped):**
-- Columns ending in `_id` (raw foreign key IDs — not useful for filtering in UI)
-- Columns in `_SKIP_COLUMNS`: `password`, `token`, `hash`, `secret`, `salt`, `key`, `otp`
-- Columns containing `_TEXT_HINTS`: `name`, `email`, `phone`, `address`, `description`, `remarks`, `notes`, `comment`
+**Include if low-cardinality (≤ 50 unique values):** enum-like columns (e.g. `status`, `designation`)
 
-**Performance:** For large result sets, only the first 200 rows are sampled for the cardinality check. This avoids scanning thousands of rows on every request.
+**Always exclude:** `*_id`, `*_key` columns · text columns (`name`, `email`, `description`, `remark`...) · sensitive columns (`password`, `token`, `secret`, `hash`, `otp`)
 
-**Example:** For a result containing `employee_id, name, email, designation, stream, is_active, join_date`, the output would be: `["designation", "stream", "is_active", "join_date"]`
+Samples first 200 rows on large result sets to keep the cardinality check fast.
 
 ---
 
-### [app/services/report_service.py](backend/app/services/report_service.py) — Service Layer
+### `app/api/routes.py` — All Endpoints + Models
 
-A thin wrapper that decouples the API layer from the LangGraph layer. The single `generate()` async method calls `run_report_agent()` from `workflow.py`.
+Defines all Pydantic request/response models and FastAPI route handlers in one file:
 
-This separation means the API routes don't import LangGraph directly, making the service layer replaceable (e.g., swap LangGraph for a different orchestrator without touching `routes.py`).
+| Model | Used by |
+|-------|---------|
+| `QueryRequest` / `QueryResponse` | `/query` (legacy) |
+| `GenerateRequest` / `ReportResponse` | `/report/generate`, `/report/clarify`, `/report/refresh` |
+| `ClarifyRequest` | `/report/clarify` |
 
----
-
-### [app/api/routes.py](backend/app/api/routes.py) — API Endpoint
-
-Defines the single `POST /query` endpoint using FastAPI's `APIRouter`.
-
-**Request validation:** Pydantic automatically validates that `query` is a non-empty string. Invalid requests return `422 Unprocessable Entity` before reaching any agent logic.
-
-**User ID:** Hardcoded as `"demo_user"` for all requests. This is used as the key for conversation history. To support multi-user scenarios, replace this with the authenticated user's ID from a JWT token or session.
-
-**Error handling:** Any unhandled exception from the pipeline returns `HTTP 500` with the exception message in `detail`.
-
----
-
-### [app/models/schemas.py](backend/app/models/schemas.py) — Data Schemas
-
-Pydantic models for request/response serialization:
-
-**`QueryRequest`** — validates incoming JSON:
-```python
-query: str   # required, non-empty string
-```
-
-**`QueryResponse`** — serializes the pipeline result:
-```python
-sql_query:                  Optional[str]
-explanation:                Optional[str]
-dimensions:                 List[str]         # default []
-recommended_column_filters: List[str]         # default []
-data:                       List[Dict]        # default []
-row_count:                  int               # default 0
-execution_time:             float             # default 0.0
-error:                      Optional[str]     # null on success
-```
-
-All fields have defaults so a partial result (e.g., error case) is always valid JSON.
+`_build_report_response()` maps the three status tracks to the correct `ReportResponse` shape.
 
 ---
 
 ## Retry Logic
 
-The agent shares a single `retry_count` across both validation and execution failures. The maximum is controlled by `MAX_RETRY_COUNT` (default: 2).
+`retry_count` is shared across validation and execution failures. Maximum: `MAX_RETRY_COUNT=2`.
 
-**Retry flow:**
 ```
-Attempt 1: GPT generates SQL → validation fails
-  → retry_count = 1, retry_feedback = "SQL validation failed: Cartesian join detected..."
-  → prompt_builder re-runs with error context
-Attempt 2: GPT self-corrects → validation passes → execution fails
-  → retry_count = 2, retry_feedback = "SQL execution failed: Table 'xyz' doesn't exist..."
-  → prompt_builder re-runs with error context
-Attempt 3: retry_count (2) >= MAX_RETRY_COUNT (2) → route to error_handler, stop
-```
+Request 1:  GPT generates SQL  →  validator: INVALID (cartesian join)
+            retry_count=1, feedback="Cartesian join detected: ..."
+            prompt_builder re-runs with error context appended
 
-When retries are exhausted, the error handler returns a user-friendly message with a specific suggestion based on the error type.
+Request 2:  GPT self-corrects  →  validator: VALID  →  execution: ERROR (unknown column)
+            retry_count=2, feedback="Unknown column 'xyz' in field list"
+            prompt_builder re-runs again
+
+Request 3:  retry_count(2) >= MAX_RETRY_COUNT(2) → error_handler → return error
+```
 
 ---
 
 ## SQL Safety Rules
 
-The validator enforces these rules on every request, regardless of what GPT generates:
-
-| Rule | Action on violation |
-|---|---|
-| Query must start with `SELECT` | UNSAFE — stop, no retry |
-| No `DELETE`, `UPDATE`, `DROP`, `TRUNCATE` | UNSAFE — stop, no retry |
-| No `INSERT`, `ALTER`, `CREATE`, `REPLACE` | UNSAFE — stop, no retry |
-| No `EXEC`, `EXECUTE`, `GRANT`, `REVOKE` | UNSAFE — stop, no retry |
-| No `LOAD DATA`, `OUTFILE`, `INFILE` | UNSAFE — stop, no retry |
-| No `INTO OUTFILE`, `INTO DUMPFILE` | UNSAFE — stop, no retry |
-| No `CALL` (stored procedures) | UNSAFE — stop, no retry |
-| No SQL comments (`--`) | UNSAFE — stop, no retry |
-| No stacked queries (`;.*SELECT`) | UNSAFE — stop, no retry |
-| All JOINs must have explicit ON conditions | INVALID — retry with feedback |
-| Query must have a LIMIT | Auto-added (`LIMIT 100`) |
-| LIMIT must not exceed 1000 | Auto-capped at 1000 |
+| Rule | Violation → |
+|------|-------------|
+| Must start with `SELECT` | UNSAFE (stop) |
+| No DML: `DELETE`, `UPDATE`, `INSERT`, `REPLACE` | UNSAFE (stop) |
+| No DDL: `DROP`, `TRUNCATE`, `ALTER`, `CREATE` | UNSAFE (stop) |
+| No privilege ops: `GRANT`, `REVOKE` | UNSAFE (stop) |
+| No file ops: `LOAD DATA`, `OUTFILE`, `INFILE`, `DUMPFILE` | UNSAFE (stop) |
+| No stored procs: `EXEC`, `EXECUTE`, `CALL` | UNSAFE (stop) |
+| No SQL comments: `--` | UNSAFE (stop) |
+| No stacked queries: `;.*SELECT` | UNSAFE (stop) |
+| All JOINs need explicit ON | INVALID (retry) |
+| Missing LIMIT | Auto-added: `LIMIT 100` |
+| LIMIT > 1000 | Auto-capped: `LIMIT 1000` |
 
 ---
 
-## Filter Recommendation Logic
+## Caching Strategy
 
-The `recommended_column_filters` field tells the frontend which columns are worth offering as filter controls.
+The system uses two independent caches:
 
-**Decision tree for each column in the result:**
+### 1. Query Cache (in-memory LRU)
+- **Key:** `md5(user_id + normalized_query)`
+- **What's cached:** Full formatted result (data, SQL, explanation, dimensions, filters)
+- **TTL:** `CACHE_TTL_SECONDS` (default 1 hour)
+- **Scope:** Same user + same query text → instant response, no LLM, no DB
+- **Bypass:** Always bypassed on refresh (refresh reads live DB data)
 
-```
-Is column name in _SKIP_COLUMNS (password, token, hash, ...)?
-  → NO
-Does column name contain _TEXT_HINTS (name, email, description, ...)?
-  → NO
-Does column name end with _id?
-  → NO
-Does column name contain a date keyword (date, time, created, ...)?
-  → YES (date range filter)
-Does column name start with is_ or has_?
-  → YES (boolean toggle filter)
-Does the column have ≤ 50 unique values in the result data?
-  → YES (dropdown filter)
-Otherwise:
-  → EXCLUDE (high-cardinality — not useful as a filter)
-```
+### 2. Redis SQL Cache
+- **Key:** `sql_cache:{session_id}`
+- **What's cached:** Post-validation RBAC-secured SQL + session owner `user_id`
+- **TTL:** `STREAM_CACHE_TTL_SECONDS` (default 1 hour)
+- **Scope:** Per session — used by `/report/refresh` and `/report/stream`
+- **Purpose:** Enables re-executing the exact validated SQL with zero LLM cost
+- **Fallback:** In-memory dict when Redis is unavailable
 
 ---
 
 ## Conversation Memory
 
-Memory enables follow-up questions. Without it, each request is independent and GPT has no context for queries like "sort those by salary" or "show me only the active ones."
+Memory enables follow-up questions by persisting each user's Q&A history in the `conversation_history` MySQL table (auto-created at startup).
 
-**How it works:**
-1. After a successful query, `memory_store_node` writes two rows to `conversation_history`:
-   - `role='user'`, `content='Show employees by stream'`
-   - `role='assistant'`, `content='This query groups employees by stream. (Returned 12 rows)'`, `sql_query='SELECT...'`
-2. On the next request, `load_context_node` reads the last `MAX_CONVERSATION_HISTORY` rows for this user
-3. The formatted history is injected into the prompt so GPT can resolve references to previous results
+**On every successful query:**
+```sql
+INSERT INTO conversation_history (user_id, role, content, sql_query) VALUES
+  ('user_42', 'user', 'Show all KRA goals for Q1 2025', NULL),
+  ('user_42', 'assistant', 'This query retrieves KRA goals... (Returned 12 rows)', 'SELECT ...');
+```
 
-**Fallback:** If MySQL is unavailable when writing, the history is stored in an in-memory `deque(maxlen=100)` so the current session still has context.
-
----
-
-## Performance Optimizations
-
-| Optimization | Location | Impact |
-|---|---|---|
-| Schema batch loading (2 queries vs N+1) | `schema_manager.py` | 126 → 2 queries at startup |
-| LangGraph compiled once at import | `workflow.py` | Zero graph compilation cost per request |
-| Lazy LLM initialization | `llm_agent.py` | No OpenAI client created until first request |
-| Pre-compiled regex patterns (19 safety + 5 utility) | `sql_validator.py` | No regex recompilation per request |
-| `frozenset` for metric keyword lookup | `nodes.py` | O(1) vs O(n) per column |
-| Connection pool (10 + 20 overflow) | `connection.py` | No connection overhead per request |
-| Row sampling (first 200 rows) for cardinality | `filter_recommender.py` | Avoids scanning full result on every request |
-| Bounded `deque(maxlen=100)` per user | `conversation_memory.py` | Prevents memory growth on memory fallback |
+**On next request from same user:**
+The last 10 turns are loaded and injected into the LLM prompt, so GPT understands references like "sort those by score" or "show only the active ones."
 
 ---
 
 ## Dependencies
 
 | Package | Purpose |
-|---|---|
-| `langgraph` | StateGraph orchestration (the pipeline engine) |
-| `langchain` | LLM abstractions and chain utilities |
-| `langchain-openai` | `ChatOpenAI` wrapper for GPT-4o-mini |
-| `langchain-community` | Community integrations (tools, loaders) |
-| `fastapi` | Web framework for the REST API |
-| `uvicorn[standard]` | ASGI server to run FastAPI |
-| `sqlalchemy` | ORM and connection pooling for MySQL |
-| `pymysql` | Pure-Python MySQL driver (used by SQLAlchemy) |
-| `cryptography` | Required by pymysql for SSL support |
-| `pydantic` | Request/response validation and serialization |
-| `pydantic-settings` | Settings management from environment variables |
-| `python-dotenv` | Loads `.env` file into environment |
-| `redis` | Optional: for distributed session/cache (not active by default) |
-| `tenacity` | Retry utilities (available for resilience patterns) |
+|---------|---------|
+| `langgraph` | StateGraph pipeline orchestration |
+| `langchain` | LLM abstractions |
+| `langchain-openai` | ChatOpenAI wrapper for GPT-4o-mini |
+| `langchain-community` | Community integrations |
+| `fastapi` | REST + WebSocket framework |
+| `uvicorn[standard]` | ASGI server |
+| `sqlalchemy` | ORM + connection pooling for MySQL |
+| `pymysql` | Pure-Python MySQL driver |
+| `cryptography` | Required by pymysql for SSL |
+| `pydantic` | Request/response validation |
+| `pydantic-settings` | Settings management |
+| `python-dotenv` | Loads `.env` into environment |
+| `redis` | Redis client for SQL cache |
+| `tenacity` | Retry utilities |

@@ -4,16 +4,25 @@ from typing import Any, Dict
 from langgraph.graph import END, StateGraph
 
 from app.graph.nodes import (
+    cache_lookup_node,
+    cache_store_node,
+    cache_write_node,
+    clarification_node,
     error_handler_node,
     execution_engine_node,
     increment_retry_execution_node,
     increment_retry_validation_node,
+    intent_detector_node,
     llm_node,
     load_context_node,
     memory_store_node,
+    off_topic_node,
     prompt_builder_node,
+    refresh_execution_node,
+    response_node,
     result_formatter_node,
     route_after_execution,
+    route_after_intent_detection,
     route_after_validation,
     sql_agent_node,
     sql_validator_node,
@@ -22,108 +31,251 @@ from app.graph.state import AgentState
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared routing helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _route_after_cache_lookup(state: AgentState) -> str:
+    return "memory_store" if state.get("cache_hit") else "intent_detector"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main workflow (first-query path)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_workflow():
     graph = StateGraph(AgentState)
 
-    # ── Register nodes ──────────────────────────────────────────────────────
-    graph.add_node("load_context", load_context_node)
-    graph.add_node("prompt_builder", prompt_builder_node)
-    graph.add_node("llm", llm_node)
-    graph.add_node("sql_agent", sql_agent_node)
-    graph.add_node("sql_validator", sql_validator_node)
+    # ── Nodes ────────────────────────────────────────────────────────────────
+    graph.add_node("load_context",               load_context_node)
+    graph.add_node("cache_lookup",               cache_lookup_node)
+    graph.add_node("intent_detector",            intent_detector_node)
+    graph.add_node("off_topic",                  off_topic_node)
+    graph.add_node("clarification",              clarification_node)
+    graph.add_node("prompt_builder",             prompt_builder_node)
+    graph.add_node("llm",                        llm_node)
+    graph.add_node("sql_agent",                  sql_agent_node)
+    graph.add_node("sql_validator",              sql_validator_node)
+    graph.add_node("cache_write",                cache_write_node)       # NEW
     graph.add_node("increment_retry_validation", increment_retry_validation_node)
-    graph.add_node("execution_engine", execution_engine_node)
-    graph.add_node("increment_retry_execution", increment_retry_execution_node)
-    graph.add_node("result_formatter", result_formatter_node)
-    graph.add_node("memory_store", memory_store_node)
-    graph.add_node("error_handler", error_handler_node)
+    graph.add_node("execution_engine",           execution_engine_node)
+    graph.add_node("increment_retry_execution",  increment_retry_execution_node)
+    graph.add_node("result_formatter",           result_formatter_node)
+    graph.add_node("cache_store",                cache_store_node)
+    graph.add_node("memory_store",               memory_store_node)
+    graph.add_node("error_handler",              error_handler_node)
 
-    # ── Entry point ──────────────────────────────────────────────────────────
+    # ── Entry point ───────────────────────────────────────────────────────────
     graph.set_entry_point("load_context")
+    graph.add_edge("load_context", "cache_lookup")
 
-    # ── Linear edges ────────────────────────────────────────────────────────
-    graph.add_edge("load_context", "prompt_builder")
+    # ── Cache hit → skip pipeline; miss → intent detection ───────────────────
+    graph.add_conditional_edges(
+        "cache_lookup",
+        _route_after_cache_lookup,
+        {"memory_store": "memory_store", "intent_detector": "intent_detector"},
+    )
+
+    # ── Intent routing (Track A / B / C) ─────────────────────────────────────
+    graph.add_conditional_edges(
+        "intent_detector",
+        route_after_intent_detection,
+        {
+            "off_topic":      "off_topic",
+            "clarification":  "clarification",
+            "prompt_builder": "prompt_builder",
+        },
+    )
+    graph.add_edge("off_topic",     END)
+    graph.add_edge("clarification", END)
+
+    # ── SQL generation pipeline ───────────────────────────────────────────────
     graph.add_edge("prompt_builder", "llm")
-    graph.add_edge("llm", "sql_agent")
-    graph.add_edge("sql_agent", "sql_validator")
+    graph.add_edge("llm",            "sql_agent")
+    graph.add_edge("sql_agent",      "sql_validator")
 
-    # ── Conditional: after validation ───────────────────────────────────────
+    # ── After validation: cache valid SQL, then execute; retry/stop on failure ─
     graph.add_conditional_edges(
         "sql_validator",
         route_after_validation,
         {
-            "execute": "execution_engine",
-            "retry": "increment_retry_validation",
-            "stop": "error_handler",
+            "execute": "cache_write",               # cache → execution_engine
+            "retry":   "increment_retry_validation",
+            "stop":    "error_handler",
         },
     )
-
-    # Retry loop: validation failure → rebuild prompt → re-run pipeline
+    graph.add_edge("cache_write",                "execution_engine")   # NEW edge
     graph.add_edge("increment_retry_validation", "prompt_builder")
 
-    # ── Conditional: after execution ─────────────────────────────────────────
+    # ── After execution ───────────────────────────────────────────────────────
     graph.add_conditional_edges(
         "execution_engine",
         route_after_execution,
         {
             "format": "result_formatter",
-            "retry": "increment_retry_execution",
-            "stop": "error_handler",
+            "retry":  "increment_retry_execution",
+            "stop":   "error_handler",
         },
     )
-
-    # Retry loop: execution failure → rebuild prompt → re-run pipeline
     graph.add_edge("increment_retry_execution", "prompt_builder")
 
-    # ── Terminal edges ───────────────────────────────────────────────────────
-    graph.add_edge("result_formatter", "memory_store")
-    graph.add_edge("memory_store", END)
-    graph.add_edge("error_handler", END)
+    # ── Terminal ──────────────────────────────────────────────────────────────
+    graph.add_edge("result_formatter", "cache_store")
+    graph.add_edge("cache_store",      "memory_store")
+    graph.add_edge("memory_store",     END)
+    graph.add_edge("error_handler",    END)
 
     return graph.compile()
 
 
-# Compiled once at module import
-_workflow = build_workflow()
+# ─────────────────────────────────────────────────────────────────────────────
+# Refresh workflow (bypass all LLM / validation / RBAC nodes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_refresh_workflow():
+    graph = StateGraph(AgentState)
+    graph.add_node("refresh_execution", refresh_execution_node)
+    graph.add_node("response",          response_node)
+    graph.set_entry_point("refresh_execution")
+    graph.add_edge("refresh_execution", "response")
+    graph.add_edge("response",          END)
+    return graph.compile()
 
 
-async def run_report_agent(user_id: str, query: str, debug: bool = False) -> Dict[str, Any]:
-    initial: AgentState = {
-        "user_id": user_id,
-        "user_query": query,
-        "debug": debug,
-        "schema": "",
-        "memory_context": "",
-        "prompt": "",
-        "llm_response": {},
-        "refined_sql": "",
-        "validation_status": "",
-        "validation_message": "",
-        "execution_result": {},
-        "execution_time": 0.0,
-        "formatted_result": {},
-        "retry_count": 0,
-        "retry_feedback": "",
-        "steps": [],
+# Compiled once at module import — singletons
+_workflow         = build_workflow()
+_refresh_workflow = build_refresh_workflow()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry points
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _base_state(extra: Dict[str, Any]) -> AgentState:
+    """Merge caller-supplied fields with safe defaults for all AgentState keys."""
+    defaults: AgentState = {
+        "user_id":             "",
+        "user_query":          "",
+        "user_role":           "employee",
+        "session_id":          "",
+        "debug":               False,
+        "schema":              "",
+        "memory_context":      "",
+        "prompt":              "",
+        "llm_response":        {},
+        "refined_sql":         "",
+        "validation_status":   "",
+        "validation_message":  "",
+        "execution_result":    {},
+        "execution_time":      0.0,
+        "formatted_result":    {},
+        "cache_hit":           False,
+        "cache_key":           "",
+        "retry_count":         0,
+        "retry_feedback":      "",
+        "steps":               [],
+        "intent_track":        "",
+        "intent_confidence":   0.0,
+        "intent_reasoning":    "",
+        "off_topic_reason":    "",
+        "off_topic_message":   "",
+        "clarification_round": 0,
+        "follow_up_question":  "",
+        "follow_up_options":   [],
+        "user_answer":         "",
+        "prior_followup":      "",
+        "extracted_filters":   {},
+        "enriched_prompt":     "",
+        "refresh_mode":        False,
+        "refreshed_at":        "",
     }
+    defaults.update(extra)
+    return defaults
 
+
+async def run_report_agent(
+    user_id: str,
+    query: str,
+    debug: bool = False,
+    session_id: str = "",
+) -> Dict[str, Any]:
+    """Original entry point — preserved for the existing /api/v1/query endpoint."""
+    initial = _base_state({"user_id": user_id, "user_query": query, "debug": debug, "session_id": session_id})
     try:
         final: AgentState = await _workflow.ainvoke(initial)
         result = dict(final.get("formatted_result", {}))
+        result.setdefault("cache_hit", False)
         if debug:
             result["steps"] = final.get("steps", [])
-        logger.info(f"[workflow] completed for user={user_id} rows={result.get('row_count', 0)}")
+        logger.info(
+            f"[workflow] completed user={user_id} rows={result.get('row_count', 0)} "
+            f"cache_hit={result['cache_hit']}"
+        )
         return result
-    except Exception as e:
-        logger.exception(f"[workflow] unhandled exception for user={user_id}: {e}")
+    except Exception as exc:
+        logger.exception(f"[workflow] unhandled error user={user_id}: {exc}")
         return {
-            "data": [],
-            "columns": [],
-            "metrics": [],
-            "dimensions": [],
-            "row_count": 0,
-            "execution_time": 0.0,
-            "error": f"Pipeline error: {e}",
-            "suggestion": "An unexpected error occurred. Please try again.",
+            "data": [], "row_count": 0, "execution_time": 0.0,
+            "error": f"Pipeline error: {exc}",
+        }
+
+
+async def run_intent_report(
+    user_id: str,
+    query: str,
+    user_role: str = "employee",
+    clarification_round: int = 0,
+    prior_followup: str = "",
+    session_id: str = "",
+    debug: bool = False,
+) -> Dict[str, Any]:
+    """Intent-aware entry point used by /report/generate and /report/clarify."""
+    initial = _base_state({
+        "user_id":             user_id,
+        "user_query":          query,
+        "user_role":           user_role,
+        "clarification_round": clarification_round,
+        "prior_followup":      prior_followup,
+        "session_id":          session_id,
+        "debug":               debug,
+    })
+    try:
+        final: AgentState = await _workflow.ainvoke(initial)
+        result = dict(final.get("formatted_result", {}))
+        result.setdefault("status", "error" if result.get("error") else "success")
+        if result.get("status") == "success" and not result.get("enriched_prompt"):
+            result["enriched_prompt"] = final.get("enriched_prompt", "")
+        result.setdefault("cache_hit", False)
+        if debug:
+            result["steps"] = final.get("steps", [])
+        logger.info(
+            f"[workflow] intent_report user={user_id} status={result.get('status')} "
+            f"track={final.get('intent_track', '?')} round={clarification_round}"
+        )
+        return result
+    except Exception as exc:
+        logger.exception(f"[workflow] unhandled error user={user_id}: {exc}")
+        return {"status": "success", "data": [], "row_count": 0,
+                "execution_time": 0.0, "error": f"Pipeline error: {exc}"}
+
+
+async def run_refresh_agent(session_id: str, user_id: str) -> Dict[str, Any]:
+    """
+    Refresh-only entry point — reads cached SQL from Redis and executes it
+    directly.  Never calls any LLM, prompt builder, validator, or RBAC node.
+    """
+    initial = _base_state({
+        "session_id":  session_id,
+        "user_id":     user_id,
+        "refresh_mode": True,
+    })
+    try:
+        final: AgentState = await _refresh_workflow.ainvoke(initial)
+        return dict(final.get("formatted_result", {}))
+    except Exception as exc:
+        logger.exception(f"[refresh_workflow] error session={session_id}: {exc}")
+        return {
+            "status":     "error",
+            "error_code": "EXECUTION_ERROR",
+            "message":    f"Refresh failed: {exc}",
         }

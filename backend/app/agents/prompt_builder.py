@@ -61,9 +61,11 @@ class PromptBuilder:
     ) -> str:
         memory_section = memory_context if memory_context else "No prior conversation."
 
+        # Escape any literal braces in untrusted content before str.format()
+        # so that column names like {id} or JSON-type columns don't cause KeyError.
         system = SYSTEM_PROMPT_TEMPLATE.format(
-            schema=schema_string,
-            memory_context=memory_section,
+            schema=schema_string.replace("{", "{{").replace("}", "}}"),
+            memory_context=memory_section.replace("{", "{{").replace("}", "}}"),
         )
 
         retry_section = ""

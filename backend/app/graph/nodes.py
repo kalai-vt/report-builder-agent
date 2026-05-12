@@ -1,10 +1,16 @@
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 
+from sqlalchemy.exc import OperationalError
+
+from app.agents.intent_agent import intent_agent
 from app.agents.llm_agent import llm_agent
 from app.agents.prompt_builder import prompt_builder
 from app.agents.sql_agent import sql_refinement_agent
+from app.cache.query_cache import QueryCache
+from app.cache.redis_cache import sql_cache
 from app.config import settings
 from app.db.connection import db_manager
 from app.db.schema_manager import schema_manager
@@ -12,6 +18,11 @@ from app.graph.state import AgentState
 from app.memory.conversation_memory import memory_manager
 from app.services.filter_recommender import filter_recommender
 from app.validators.sql_validator import ValidationStatus, sql_validator
+
+query_cache = QueryCache(
+    ttl_seconds=settings.CACHE_TTL_SECONDS,
+    max_size=settings.CACHE_MAX_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +33,69 @@ logger = logging.getLogger(__name__)
 
 def _steps(state: AgentState) -> list:
     return list(state.get("steps", []))
+
+
+# ─────────────────────────────────────────────
+# Node: Cache Lookup (runs after load_context)
+# ─────────────────────────────────────────────
+
+def cache_lookup_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    key = query_cache.make_key(state["user_id"], state["user_query"])
+    cached = query_cache.get(key)
+
+    if cached is not None:
+        result = dict(cached)
+        result["cache_hit"] = True
+        step = {
+            "node": "cache_lookup",
+            "status": "hit",
+            "cache_key": key[:8],
+            "duration_ms": round((time.time() - t0) * 1000, 1),
+        }
+        logger.info(f"[cache_lookup] HIT user={state['user_id']} key={key[:8]}")
+        return {
+            "cache_hit": True,
+            "cache_key": key,
+            "formatted_result": result,
+            "steps": _steps(state) + [step],
+        }
+
+    step = {
+        "node": "cache_lookup",
+        "status": "miss",
+        "cache_key": key[:8],
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(f"[cache_lookup] MISS user={state['user_id']} key={key[:8]}")
+    return {
+        "cache_hit": False,
+        "cache_key": key,
+        "steps": _steps(state) + [step],
+    }
+
+
+# ─────────────────────────────────────────────
+# Node: Cache Store (runs after result_formatter)
+# ─────────────────────────────────────────────
+
+def cache_store_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    key = state.get("cache_key", "")
+    formatted = state.get("formatted_result", {})
+
+    stored = False
+    if key and not formatted.get("error"):
+        query_cache.set(key, formatted)
+        stored = True
+
+    step = {
+        "node": "cache_store",
+        "status": "stored" if stored else "skipped",
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(f"[cache_store] user={state['user_id']} stored={stored}")
+    return {"steps": _steps(state) + [step]}
 
 
 # ─────────────────────────────────────────────
@@ -56,8 +130,10 @@ def load_context_node(state: AgentState) -> Dict[str, Any]:
 
 def prompt_builder_node(state: AgentState) -> Dict[str, Any]:
     t0 = time.time()
+    # Use the intent-enriched prompt when available (Track C path)
+    effective_query = state.get("enriched_prompt") or state["user_query"]
     built_prompt = prompt_builder.build_prompt(
-        user_query=state["user_query"],
+        user_query=effective_query,
         user_id=state["user_id"],
         schema_string=state.get("schema", ""),
         memory_context=state.get("memory_context", ""),
@@ -271,13 +347,14 @@ def memory_store_node(state: AgentState) -> Dict[str, Any]:
 
     row_count = formatted.get("row_count", 0)
     explanation = formatted.get("explanation", "Query completed.")
-    assistant_msg = f"{explanation} (Returned {row_count} rows)"
+    cache_note = " [cache hit]" if state.get("cache_hit") else ""
+    assistant_msg = f"{explanation} (Returned {row_count} rows{cache_note})"
 
     memory_manager.add_interaction(
         user_id=user_id,
         user_message=state["user_query"],
         assistant_message=assistant_msg,
-        sql_query=sql,
+        sql_query=sql or formatted.get("sql_query", ""),
     )
 
     step = {
@@ -339,6 +416,108 @@ def _suggest(error_message: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# Node: Intent Detector (NEW — runs after cache miss)
+# ─────────────────────────────────────────────
+
+def intent_detector_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    user_query = state.get("user_query", "")
+    user_role = state.get("user_role", "employee")
+    clarification_round = state.get("clarification_round", 0)
+    prior_followup = state.get("prior_followup", "")
+    schema_str = state.get("schema", "")
+
+    result = intent_agent.classify(
+        user_message=user_query,
+        user_role=user_role,
+        clarification_round=clarification_round,
+        prior_followup=prior_followup,
+        schema_summary=schema_str,
+    )
+
+    duration = round((time.time() - t0) * 1000, 1)
+    step = {
+        "node": "intent_detector",
+        "status": "success",
+        "track": result["track"],
+        "confidence": result["confidence"],
+        "duration_ms": duration,
+    }
+    logger.info(
+        f"[intent_detector] user={state['user_id']} track={result['track']} "
+        f"round={clarification_round} confidence={result['confidence']:.2f}"
+    )
+    return {
+        "intent_track": result["track"],
+        "intent_confidence": result["confidence"],
+        "intent_reasoning": result.get("reasoning", ""),
+        "off_topic_reason": result.get("off_topic_reason") or "",
+        "off_topic_message": result.get("polite_block_message") or "",
+        "follow_up_question": result.get("follow_up_question") or "",
+        "follow_up_options": result.get("follow_up_options") or [],
+        "enriched_prompt": result.get("enriched_prompt") or "",
+        "extracted_filters": result.get("extracted_filters") or {},
+        "steps": _steps(state) + [step],
+    }
+
+
+# ─────────────────────────────────────────────
+# Node: Off-Topic Handler (NEW — Track A)
+# ─────────────────────────────────────────────
+
+def off_topic_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    message = state.get("off_topic_message", "")
+
+    # Extract bullet-point suggestions from the polite block message
+    suggestions = [
+        line.lstrip("•").strip()
+        for line in message.splitlines()
+        if line.strip().startswith("•")
+    ]
+
+    formatted = {
+        "status": "off_topic",
+        "message": message,
+        "suggestions": suggestions,
+    }
+    step = {
+        "node": "off_topic",
+        "status": "success",
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(f"[off_topic] user={state['user_id']} reason={state.get('off_topic_reason')}")
+    return {"formatted_result": formatted, "steps": _steps(state) + [step]}
+
+
+# ─────────────────────────────────────────────
+# Node: Clarification Handler (NEW — Track B)
+# ─────────────────────────────────────────────
+
+def clarification_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    formatted = {
+        "status": "clarification_needed",
+        "follow_up_question": state.get("follow_up_question", ""),
+        "follow_up_options": state.get("follow_up_options", []),
+        "clarification_round": state.get("clarification_round", 0),
+        "original_prompt": state.get("user_query", ""),
+        "missing_field": state.get("intent_reasoning", ""),
+    }
+    step = {
+        "node": "clarification",
+        "status": "success",
+        "round": state.get("clarification_round", 0),
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(
+        f"[clarification] user={state['user_id']} round={state.get('clarification_round', 0)} "
+        f"question={state.get('follow_up_question', '')[:60]}"
+    )
+    return {"formatted_result": formatted, "steps": _steps(state) + [step]}
+
+
+# ─────────────────────────────────────────────
 # Conditional Edge Functions
 # ─────────────────────────────────────────────
 
@@ -365,3 +544,180 @@ def route_after_execution(state: AgentState) -> str:
     if retry_count < settings.MAX_RETRY_COUNT:
         return "retry"
     return "stop"
+
+
+def route_after_intent_detection(state: AgentState) -> str:
+    track = state.get("intent_track", "clear")
+    if track == "off_topic":
+        return "off_topic"
+    if track == "incomplete":
+        return "clarification"
+    return "prompt_builder"
+
+
+# ─────────────────────────────────────────────
+# Node: Cache Write (NEW — after sql_validator, before execution_engine)
+# ─────────────────────────────────────────────
+
+def cache_write_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Persists the post-validation, RBAC-secured SQL to Redis so that
+    subsequent refresh requests can execute it directly, bypassing the
+    entire LLM pipeline.  Failure is intentionally non-blocking.
+    """
+    t0 = time.time()
+    session_id = state.get("session_id", "")
+    user_id = state.get("user_id", "")
+    secured_sql = state.get("refined_sql", "")
+
+    stored = False
+    if session_id and secured_sql:
+        stored = sql_cache.store(
+            session_id=session_id,
+            user_id=user_id,
+            secured_sql=secured_sql,
+        )
+
+    step = {
+        "node": "cache_write",
+        "status": "stored" if stored else "skipped",
+        "session_id": session_id[:16] if session_id else "",
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(f"[cache_write] user={user_id} stored={stored} session={session_id[:16] if session_id else 'none'}")
+    return {"steps": _steps(state) + [step]}
+
+
+# ─────────────────────────────────────────────
+# Node: Refresh Execution (NEW — refresh graph only)
+# ─────────────────────────────────────────────
+
+def refresh_execution_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Reads cached SQL from Redis, validates user access, executes against
+    MySQL, and populates state for response_node.  Never touches any LLM,
+    validator, or RBAC node.
+    """
+    session_id = state.get("session_id", "")
+    request_user_id = state.get("user_id", "")
+    t0 = time.time()
+
+    # ── 1. Read from Redis ────────────────────────────────────────────────────
+    cached = sql_cache.get(session_id)
+    if cached is None:
+        logger.warning(f"[refresh] SESSION_EXPIRED session={session_id[:16]}")
+        return {
+            "formatted_result": {
+                "status": "error",
+                "error_code": "SESSION_EXPIRED",
+                "message": "Cached SQL not found or expired. Please regenerate the report.",
+            }
+        }
+
+    # ── 2. Validate user access ───────────────────────────────────────────────
+    if cached["user_id"] != request_user_id:
+        logger.warning(
+            f"[refresh] ACCESS_DENIED session={session_id[:16]} "
+            f"cached_user={cached['user_id']} request_user={request_user_id}"
+        )
+        return {
+            "formatted_result": {
+                "status": "error",
+                "error_code": "ACCESS_DENIED",
+                "message": "Access denied: user does not match the session owner.",
+            }
+        }
+
+    secured_sql = cached["secured_sql"]
+
+    # ── 3. Safety guard: only SELECT is allowed ───────────────────────────────
+    if not secured_sql.strip().upper().startswith("SELECT"):
+        logger.error(f"[refresh] non-SELECT SQL in cache session={session_id[:16]}")
+        sql_cache.delete(session_id)
+        return {
+            "formatted_result": {
+                "status": "error",
+                "error_code": "ACCESS_DENIED",
+                "message": "Cached query is not a SELECT statement.",
+            }
+        }
+
+    # ── 4. Execute against MySQL ──────────────────────────────────────────────
+    try:
+        rows, columns = db_manager.execute_query(secured_sql)
+    except OperationalError as exc:
+        logger.error(f"[refresh] SCHEMA_CHANGED session={session_id[:16]}: {exc}")
+        sql_cache.delete(session_id)
+        return {
+            "formatted_result": {
+                "status": "error",
+                "error_code": "SCHEMA_CHANGED",
+                "message": "Database schema has changed. Please regenerate the report.",
+            }
+        }
+    except Exception as exc:
+        logger.error(f"[refresh] execution error session={session_id[:16]}: {exc}")
+        return {
+            "formatted_result": {
+                "status": "error",
+                "error_code": "EXECUTION_ERROR",
+                "message": f"Query execution failed: {exc}",
+            }
+        }
+
+    duration = round(time.time() - t0, 4)
+    logger.info(f"[refresh] executed session={session_id[:16]} rows={len(rows)} ms={round(duration*1000,1)}")
+    return {
+        "execution_result": {"rows": rows, "columns": columns, "error": None},
+        "execution_time": duration,
+        "refined_sql": secured_sql,
+        # Minimal llm_response so response_node can format cleanly
+        "llm_response": {"explanation": "Live data refresh", "columns": columns, "filters": []},
+    }
+
+
+# ─────────────────────────────────────────────
+# Node: Response (NEW — refresh graph only)
+# ─────────────────────────────────────────────
+
+def response_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Formats the refresh execution result using the same logic as
+    result_formatter_node and adds refresh metadata.  If the previous
+    node set an error_code, passes it through unchanged.
+    """
+    # Pass error results straight through
+    existing = state.get("formatted_result", {})
+    if existing.get("error_code"):
+        return {}
+
+    exec_result = state.get("execution_result", {})
+    llm_resp = state.get("llm_response", {})
+    rows: list = exec_result.get("rows", [])
+    columns: list = exec_result.get("columns", [])
+
+    dimensions = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
+    recommended_filters = filter_recommender.recommended_column_filters(rows=rows, columns=columns)
+
+    refreshed_at = datetime.now(timezone.utc).isoformat()
+
+    formatted = {
+        "status": "success",
+        "sql_query": "",  # never expose cached SQL
+        "explanation": llm_resp.get("explanation", "Live data refresh"),
+        "dimensions": dimensions,
+        "recommended_column_filters": recommended_filters,
+        "data": rows,
+        "row_count": len(rows),
+        "execution_time": state.get("execution_time", 0.0),
+        "refresh_mode": True,
+        "refreshed_at": refreshed_at,
+        "cache_hit": False,
+    }
+
+    logger.info(f"[response] refresh formatted rows={len(rows)} at={refreshed_at}")
+    return {
+        "formatted_result": formatted,
+        "refresh_mode": True,
+        "refreshed_at": refreshed_at,
+    }
