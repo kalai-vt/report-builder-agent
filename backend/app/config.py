@@ -38,6 +38,8 @@ class Settings:
 
     MAX_CONVERSATION_HISTORY: int = int(os.getenv("MAX_CONVERSATION_HISTORY", "10"))
 
+    APP_PORT: int = int(os.getenv("APP_PORT", "8080"))
+
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     DEBUG_MODE: bool = os.getenv("DEBUG_MODE", "false").lower() == "true"
 

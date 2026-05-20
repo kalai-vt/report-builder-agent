@@ -46,7 +46,7 @@ async def lifespan(application):
     else:
         logger.warning("REDIS_URL not set — report refresh/streaming will be unavailable")
 
-    logger.info("Startup complete. Swagger UI: http://localhost:8001/docs")
+    logger.info(f"Startup complete. Swagger UI: http://localhost:{settings.APP_PORT}/docs")
     yield
 
 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8001,
+        port=settings.APP_PORT,
         reload=True,
         log_level=settings.LOG_LEVEL.lower(),
     )
