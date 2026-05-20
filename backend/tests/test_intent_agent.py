@@ -13,6 +13,29 @@ from app.agents.intent_agent import IntentDetectorAgent
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# Real-like options returned by the mock clarification_options_builder
+_MOCK_CLARIFICATION_OPTIONS = {
+    "time_period":    ["Q4 2026", "Q4 2025", "Q3 2026", "Q3 2025", "Q2 2025", "Q1 2025"],
+    "employee_scope": ["Ranjith Kumar Balasubramanian", "hariharan thulasi", "jeeva barathi",
+                       "RajaShree Muthu", "gopal king"],
+    "status_filter":  ["In Progress", "Hold", "Completed", "Achieved", "All"],
+    "metric":         ["Goal completion status", "Goal count by employee",
+                       "Progress percentage", "Rating summary", "Goals by designation"],
+    "schema_scope":   ["KRA Goals (master_goals)", "Goal Assignments (user_goal_mapping)",
+                       "R&R Nominations (rnr_nominations)", "Certifications (certification_completion)"],
+    "designation":    ["Associate", "Senior Associate", "Professional", "Lead Professional",
+                       "Architect - Technology & Solutions"],
+}
+
+
+def _mock_clarification_options_builder():
+    """Return a MagicMock that behaves like clarification_options_builder."""
+    cob = MagicMock()
+    cob.get_options.side_effect = lambda field: _MOCK_CLARIFICATION_OPTIONS.get(field, [])
+    cob.get_all_options.return_value = _MOCK_CLARIFICATION_OPTIONS
+    return cob
+
+
 # Stable schema-driven suggestions returned by the mock suggestion_builder
 _MOCK_SUGGESTIONS = {
     "employee": [
@@ -72,10 +95,16 @@ class TestGreetingTrack:
             "app.agents.intent_agent.suggestion_builder",
             _mock_suggestion_builder(),
         )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
         self._sb_patch.start()
+        self._cob_patch.start()
 
     def teardown_method(self):
         self._sb_patch.stop()
+        self._cob_patch.stop()
 
     def _llm_greeting(self, message: str, role: str = "employee") -> str:
         return f"""{{
@@ -171,10 +200,16 @@ class TestOffTopicTrack:
             "app.agents.intent_agent.suggestion_builder",
             _mock_suggestion_builder(),
         )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
         self._sb_patch.start()
+        self._cob_patch.start()
 
     def teardown_method(self):
         self._sb_patch.stop()
+        self._cob_patch.stop()
 
     def _llm_off_topic(self, reason: str = "general_knowledge", role: str = "employee") -> str:
         return f"""{{
@@ -290,10 +325,16 @@ class TestIncompleteTrack:
             "app.agents.intent_agent.suggestion_builder",
             _mock_suggestion_builder(),
         )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
         self._sb_patch.start()
+        self._cob_patch.start()
 
     def teardown_method(self):
         self._sb_patch.stop()
+        self._cob_patch.stop()
 
     def _llm_incomplete(self, missing: str = "time_period") -> str:
         return f"""{{
@@ -373,10 +414,16 @@ class TestClearTrack:
             "app.agents.intent_agent.suggestion_builder",
             _mock_suggestion_builder(),
         )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
         self._sb_patch.start()
+        self._cob_patch.start()
 
     def teardown_method(self):
         self._sb_patch.stop()
+        self._cob_patch.stop()
 
     def _llm_clear(self, enriched: str) -> str:
         return f"""{{
@@ -427,10 +474,16 @@ class TestFallback:
             "app.agents.intent_agent.suggestion_builder",
             _mock_suggestion_builder(),
         )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
         self._sb_patch.start()
+        self._cob_patch.start()
 
     def teardown_method(self):
         self._sb_patch.stop()
+        self._cob_patch.stop()
 
     def test_unparseable_llm_response_falls_back_to_clear(self):
         _mock_llm_response(self.agent, "sorry i cannot help you with that")
@@ -478,10 +531,16 @@ class TestGreetingVsOffTopic:
             "app.agents.intent_agent.suggestion_builder",
             _mock_suggestion_builder(),
         )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
         self._sb_patch.start()
+        self._cob_patch.start()
 
     def teardown_method(self):
         self._sb_patch.stop()
+        self._cob_patch.stop()
 
     def test_greeting_does_not_return_polite_block_message(self):
         json_str = """{
@@ -714,3 +773,147 @@ class TestSuggestionBuilder:
         with self._patch_schema(self._make_full_schema()):
             employee_items = self.builder.get_suggestions("employee")
         assert items == employee_items
+
+
+# ── DB-Driven Follow-Up Options ───────────────────────────────────────────────
+
+class TestDBDrivenFollowUpOptions:
+    """
+    Verifies that follow_up_options are always overridden with live DB data,
+    never sourced from LLM-hallucinated values.
+    """
+
+    def setup_method(self):
+        self.agent = _make_agent()
+        self._sb_patch = patch(
+            "app.agents.intent_agent.suggestion_builder",
+            _mock_suggestion_builder(),
+        )
+        self._cob_patch = patch(
+            "app.agents.intent_agent.clarification_options_builder",
+            _mock_clarification_options_builder(),
+        )
+        self._sb_patch.start()
+        self._cob_patch.start()
+
+    def teardown_method(self):
+        self._sb_patch.stop()
+        self._cob_patch.stop()
+
+    def _llm_incomplete_with_fake_options(self, missing_field: str, fake_options: list) -> str:
+        import json
+        return json.dumps({
+            "track": "incomplete",
+            "confidence": 0.90,
+            "greeting_message": None,
+            "off_topic_reason": None,
+            "polite_block_message": None,
+            "missing_field": missing_field,
+            "follow_up_question": f"Which {missing_field} would you like?",
+            "follow_up_options": fake_options,
+            "enriched_prompt": None,
+            "extracted_filters": {},
+            "reasoning": f"missing {missing_field}",
+        })
+
+    def test_time_period_options_come_from_db_not_llm(self):
+        """LLM returns hallucinated dates — result must use DB options instead."""
+        fake = ["Jan 2020", "Feb 2019", "March 2018"]
+        _mock_llm_response(
+            self.agent,
+            self._llm_incomplete_with_fake_options("time_period", fake),
+        )
+        result = self.agent.classify("show my goals", user_role="employee")
+        assert result["track"] == "incomplete"
+        # Options must match DB mock, not the LLM's fake list
+        assert result["follow_up_options"] == _MOCK_CLARIFICATION_OPTIONS["time_period"]
+        for fake_val in fake:
+            assert fake_val not in result["follow_up_options"]
+
+    def test_employee_scope_options_are_real_names_not_hallucinated(self):
+        """LLM returns 'John Doe', 'Jane Smith' — result must use real DB names."""
+        fake = ["John Doe", "Jane Smith", "Alice Johnson", "Bob Brown"]
+        _mock_llm_response(
+            self.agent,
+            self._llm_incomplete_with_fake_options("employee_scope", fake),
+        )
+        result = self.agent.classify("show team goals", user_role="manager")
+        assert result["follow_up_options"] == _MOCK_CLARIFICATION_OPTIONS["employee_scope"]
+        assert "John Doe" not in result["follow_up_options"]
+        assert "Jane Smith" not in result["follow_up_options"]
+
+    def test_status_filter_options_come_from_db(self):
+        fake = ["active", "inactive", "pending"]
+        _mock_llm_response(
+            self.agent,
+            self._llm_incomplete_with_fake_options("status_filter", fake),
+        )
+        result = self.agent.classify("show goals by status", user_role="manager")
+        assert result["follow_up_options"] == _MOCK_CLARIFICATION_OPTIONS["status_filter"]
+        assert "active" not in result["follow_up_options"]
+
+    def test_metric_options_come_from_db(self):
+        fake = ["score", "rank", "something"]
+        _mock_llm_response(
+            self.agent,
+            self._llm_incomplete_with_fake_options("metric", fake),
+        )
+        result = self.agent.classify("show performance", user_role="hr")
+        assert result["follow_up_options"] == _MOCK_CLARIFICATION_OPTIONS["metric"]
+
+    def test_schema_scope_options_come_from_db(self):
+        fake = ["Table A", "Table B"]
+        _mock_llm_response(
+            self.agent,
+            self._llm_incomplete_with_fake_options("schema_scope", fake),
+        )
+        result = self.agent.classify("show report", user_role="hr")
+        assert result["follow_up_options"] == _MOCK_CLARIFICATION_OPTIONS["schema_scope"]
+
+    def test_options_are_non_empty_for_all_missing_fields(self):
+        """Every supported missing_field must return at least 3 options."""
+        for field in ["time_period", "employee_scope", "status_filter", "metric", "schema_scope"]:
+            _mock_llm_response(
+                self.agent,
+                self._llm_incomplete_with_fake_options(field, []),
+            )
+            result = self.agent.classify("show data", user_role="manager")
+            assert len(result["follow_up_options"]) >= 3, (
+                f"field={field} returned fewer than 3 options: {result['follow_up_options']}"
+            )
+
+    def test_clear_track_does_not_override_options(self):
+        """For non-incomplete tracks, follow_up_options stays empty (not overridden)."""
+        clear_json = """{
+            "track": "clear",
+            "confidence": 0.98,
+            "greeting_message": null,
+            "off_topic_reason": null,
+            "polite_block_message": null,
+            "missing_field": null,
+            "follow_up_question": null,
+            "follow_up_options": [],
+            "enriched_prompt": "Show KRA goals for Q1 2025.",
+            "extracted_filters": {},
+            "reasoning": "complete query"
+        }"""
+        _mock_llm_response(self.agent, clear_json)
+        result = self.agent.classify("show my goals Q1 2025", user_role="employee")
+        assert result["track"] == "clear"
+        assert result["follow_up_options"] == []
+
+    def test_follow_up_question_still_comes_from_llm(self):
+        """The question text itself is still LLM-generated; only options are overridden."""
+        llm_question = "Which quarter are you interested in?"
+        _mock_llm_response(
+            self.agent,
+            self._llm_incomplete_with_fake_options("time_period", ["fake"]),
+        )
+        # Override the question in the mock JSON
+        import json
+        payload = json.loads(self._llm_incomplete_with_fake_options("time_period", ["fake"]))
+        payload["follow_up_question"] = llm_question
+        _mock_llm_response(self.agent, json.dumps(payload))
+        result = self.agent.classify("show my goals", user_role="employee")
+        assert result["follow_up_question"] == llm_question
+        assert result["follow_up_options"] == _MOCK_CLARIFICATION_OPTIONS["time_period"]

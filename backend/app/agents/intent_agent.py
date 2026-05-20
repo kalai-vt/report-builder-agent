@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.config import settings
+from app.services.clarification_options import clarification_options_builder
 from app.services.suggestion_builder import suggestion_builder
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,17 @@ Include all extracted values (quarter, year, status, employee names, role-approp
 
 {role_examples}
 
+=== LIVE DATABASE OPTIONS (use ONLY these values in follow_up_options — never invent names or dates) ===
+When track="incomplete", your follow_up_options MUST be chosen exclusively from the list
+matching the missing_field. Do NOT use any names, dates, or values not listed here.
+
+time_period options     : {time_period_options}
+employee_scope options  : {employee_scope_options}
+status_filter options   : {status_filter_options}
+metric options          : {metric_options}
+schema_scope options    : {schema_scope_options}
+designation options     : {designation_options}
+
 === OUTPUT FORMAT — return ONLY this JSON, no markdown, no text outside the braces ===
 {{
   "track": "greeting|off_topic|incomplete|clear",
@@ -88,7 +100,7 @@ Include all extracted values (quarter, year, status, employee names, role-approp
   "polite_block_message": "string or null",
   "missing_field": "time_period|employee_scope|metric|status_filter|schema_scope|comparison_base|null",
   "follow_up_question": "string or null",
-  "follow_up_options": ["Q1 2025", "Q2 2025", "Q3 2025", "Q4 2024", "Full year 2025"],
+  "follow_up_options": [],
   "enriched_prompt": "string or null",
   "extracted_filters": {{}},
   "reasoning": "brief one-sentence explanation"
@@ -99,11 +111,11 @@ CRITICAL RULES:
 2. clarification_round >= 2 → track MUST be "clear", enriched_prompt MUST be set.
 3. track="greeting" → greeting_message MUST be set (warm reply + one schema-based suggestion, ≤2 sentences).
 4. track="off_topic" → polite_block_message MUST be set (1-sentence decline + 1 schema-based suggestion, NO bullet lists).
-5. track="incomplete" → follow_up_question and follow_up_options MUST be set. ONE question only.
+5. track="incomplete" → follow_up_question MUST be set. follow_up_options will be overridden with live DB data.
 6. track="clear" → enriched_prompt MUST be a complete, specific sentence.
 7. NEVER ask about employee_scope when role=employee.
 8. NEVER repeat the prior_followup question — choose the next priority missing field instead.
-9. For time_period options always suggest: Q1 2025, Q2 2025, Q3 2025, Q4 2024, Full year 2025.
+9. NEVER invent employee names, dates, or status values — all options come from the live DB lists above.
 """
 
 
@@ -138,9 +150,15 @@ class IntentDetectorAgent:
         safe_schema = (schema_summary[:2000] if schema_summary else "KRA goals, ratings, appraisals, employee data")
         safe_schema = safe_schema.replace("{", "{{").replace("}", "}}")
 
-        # Build schema-driven examples and inject into the prompt
+        # Build schema-driven examples for greeting/off-topic messages
         suggestions = suggestion_builder.get_suggestions(user_role)
         role_examples = "\n".join(f"• {s}" for s in suggestions)
+
+        # Fetch live DB options for every clarification field type
+        db_options = clarification_options_builder.get_all_options()
+
+        def _fmt(opts: list) -> str:
+            return ", ".join(f'"{o}"' for o in opts) if opts else "—"
 
         system_prompt = _SYSTEM_PROMPT.format(
             user_role=user_role,
@@ -148,6 +166,12 @@ class IntentDetectorAgent:
             prior_followup=prior_followup or "None",
             schema_summary=safe_schema,
             role_examples=role_examples,
+            time_period_options=_fmt(db_options.get("time_period", [])),
+            employee_scope_options=_fmt(db_options.get("employee_scope", [])),
+            status_filter_options=_fmt(db_options.get("status_filter", [])),
+            metric_options=_fmt(db_options.get("metric", [])),
+            schema_scope_options=_fmt(db_options.get("schema_scope", [])),
+            designation_options=_fmt(db_options.get("designation", [])),
         )
 
         try:
@@ -199,15 +223,27 @@ class IntentDetectorAgent:
             redirect = suggestion_builder.get_off_topic_redirect(user_role)
             polite_block_message = f"I'm only able to help with KRA report building! {redirect}"
 
+        # Always override follow_up_options with live DB data — never trust LLM-generated values.
+        # This prevents hallucinated employee names, fake dates, and invented status values.
+        missing_field = data.get("missing_field")
+        if track == "incomplete" and missing_field:
+            follow_up_options = clarification_options_builder.get_options(missing_field)
+            logger.debug(
+                f"[intent_agent] overriding follow_up_options field={missing_field} "
+                f"count={len(follow_up_options)}"
+            )
+        else:
+            follow_up_options = data.get("follow_up_options") or []
+
         return {
             "track": track,
             "confidence": float(data.get("confidence", 0.8)),
             "greeting_message": greeting_message,
             "off_topic_reason": data.get("off_topic_reason"),
             "polite_block_message": polite_block_message,
-            "missing_field": data.get("missing_field"),
+            "missing_field": missing_field,
             "follow_up_question": data.get("follow_up_question"),
-            "follow_up_options": data.get("follow_up_options") or [],
+            "follow_up_options": follow_up_options,
             "enriched_prompt": data.get("enriched_prompt"),
             "extracted_filters": data.get("extracted_filters") or {},
             "reasoning": data.get("reasoning", ""),
