@@ -3,8 +3,6 @@ import logging
 from enum import Enum
 from typing import Tuple
 
-from app.config import settings
-
 logger = logging.getLogger(__name__)
 
 
@@ -26,13 +24,19 @@ _UNSAFE_PATTERNS = [
     ]
 ]
 
-_SELECT_RE       = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
-_LIMIT_RE        = re.compile(r"\bLIMIT\s+(\d+)", re.IGNORECASE)
-_JOIN_RE         = re.compile(r"\bJOIN\b", re.IGNORECASE)
-_ON_RE           = re.compile(r"\bON\b", re.IGNORECASE)
-_FROM_CLAUSE_RE  = re.compile(
+_SELECT_RE      = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
+_JOIN_RE        = re.compile(r"\bJOIN\b", re.IGNORECASE)
+_ON_RE          = re.compile(r"\bON\b", re.IGNORECASE)
+_FROM_CLAUSE_RE = re.compile(
     r"\bFROM\b(.+?)(?:\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)",
     re.IGNORECASE | re.DOTALL,
+)
+
+# Matches trailing LIMIT [n] OFFSET [m] or LIMIT [n],[m] at the end of a query.
+# Only strips the outermost LIMIT (not LIMIT inside subqueries).
+_TRAILING_LIMIT_RE = re.compile(
+    r"\s+LIMIT\s+\d+(\s*,\s*\d+|\s+OFFSET\s+\d+)?\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -50,7 +54,8 @@ class SQLValidator:
         if not _SELECT_RE.match(sql):
             return ValidationStatus.UNSAFE, "Only SELECT statements are permitted", sql
 
-        sql = self._enforce_limit(sql)
+        # Strip any LIMIT/OFFSET the LLM injected — pagination is applied externally
+        sql = self._strip_limit_offset(sql)
 
         if self._has_cartesian_join(sql):
             return (
@@ -71,14 +76,9 @@ class SQLValidator:
         sql = sql.replace("“", '"').replace("”", '"')
         return sql.strip().rstrip(";")
 
-    def _enforce_limit(self, sql: str) -> str:
-        m = _LIMIT_RE.search(sql)
-        if m:
-            if int(m.group(1)) > settings.MAX_RESULT_ROWS:
-                sql = _LIMIT_RE.sub(f"LIMIT {settings.MAX_RESULT_ROWS}", sql)
-        else:
-            sql = f"{sql} LIMIT {settings.DEFAULT_RESULT_LIMIT}"
-        return sql
+    def _strip_limit_offset(self, sql: str) -> str:
+        """Remove trailing LIMIT / OFFSET so the pagination layer controls row windows."""
+        return _TRAILING_LIMIT_RE.sub("", sql).strip()
 
     def _has_cartesian_join(self, sql: str) -> bool:
         m = _FROM_CLAUSE_RE.search(sql)

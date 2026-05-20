@@ -160,45 +160,71 @@ class TestCacheIntegrationWithWorkflow:
     calling the LLM.  We mock the LLM agent so the test runs offline.
     """
 
+    # Shared clear-track response returned by the mocked intent agent
+    _CLEAR_INTENT = {
+        "track": "clear",
+        "confidence": 1.0,
+        "greeting_message": "",
+        "off_topic_reason": None,
+        "polite_block_message": None,
+        "missing_field": None,
+        "follow_up_question": None,
+        "follow_up_options": [],
+        "enriched_prompt": "mock enriched prompt",
+        "extracted_filters": {},
+        "reasoning": "test mock",
+    }
+
+    def _apply_common_mocks(self, monkeypatch, nodes_module, fresh_cache, call_count, db_rows):
+        """Apply mocks shared by all three integration tests — fully offline, no MySQL/OpenAI."""
+        monkeypatch.setattr(nodes_module, "query_cache", fresh_cache)
+
+        # Bypass MySQL schema fetch in load_context_node
+        monkeypatch.setattr(nodes_module.schema_manager, "get_schema_string", lambda: "mock schema")
+        monkeypatch.setattr(nodes_module.schema_manager, "get_schema",        lambda: {})
+
+        # Bypass memory store / retrieve (avoids any DB/Redis dependency)
+        monkeypatch.setattr(nodes_module.memory_manager, "get_context_string", lambda uid: "")
+        monkeypatch.setattr(nodes_module.memory_manager, "add_interaction",    lambda **kw: None)
+
+        # Bypass intent detection (avoids real OpenAI call)
+        monkeypatch.setattr(
+            nodes_module.intent_agent,
+            "classify",
+            lambda *a, **kw: self._CLEAR_INTENT,
+        )
+
+        def mock_generate_sql(prompt: str):
+            call_count["n"] += 1
+            return {"sql_query": "SELECT 1", "explanation": "Mock result", "error": None}
+
+        monkeypatch.setattr(nodes_module.llm_agent, "generate_sql", mock_generate_sql)
+        # Bypass LIMIT 0 dry-run (no MySQL available)
+        monkeypatch.setattr(
+            nodes_module.db_manager,
+            "test_execute",
+            lambda sql, params=None: (True, ""),
+        )
+        monkeypatch.setattr(
+            nodes_module.db_manager,
+            "execute_paginated",
+            lambda sql, page=1, page_size=1000, params=None: (db_rows, list(db_rows[0].keys()) if db_rows else [], len(db_rows), 1),
+        )
+
     def test_second_call_is_cache_hit(self, monkeypatch):
         import asyncio
         from app.cache.query_cache import QueryCache
         from app.graph import nodes as nodes_module
 
-        # Replace the shared cache with a fresh one so tests are isolated
         fresh_cache = QueryCache(ttl_seconds=3600, max_size=100)
-        monkeypatch.setattr(nodes_module, "query_cache", fresh_cache)
-
         call_count = {"n": 0}
-
-        original_generate = nodes_module.llm_agent.generate_sql
-
-        def mock_generate_sql(prompt: str):
-            call_count["n"] += 1
-            return {
-                "sql_query": "SELECT 1",
-                "explanation": "Mock result",
-                "error": None,
-            }
-
-        monkeypatch.setattr(nodes_module.llm_agent, "generate_sql", mock_generate_sql)
-
-        # Also mock DB execution so we don't need a real DB
-        monkeypatch.setattr(
-            nodes_module.db_manager,
-            "execute_query",
-            lambda sql: ([{"id": 1}], ["id"]),
-        )
+        self._apply_common_mocks(monkeypatch, nodes_module, fresh_cache, call_count, [{"id": 1}])
 
         from app.graph.workflow import run_report_agent
 
         query = "List all employees"
-        r1 = asyncio.get_event_loop().run_until_complete(
-            run_report_agent("demo_user", query)
-        )
-        r2 = asyncio.get_event_loop().run_until_complete(
-            run_report_agent("demo_user", query)
-        )
+        r1 = asyncio.get_event_loop().run_until_complete(run_report_agent("demo_user", query))
+        r2 = asyncio.get_event_loop().run_until_complete(run_report_agent("demo_user", query))
 
         assert call_count["n"] == 1, (
             f"LLM was called {call_count['n']} times — expected 1 (second call should be cached)"
@@ -213,29 +239,13 @@ class TestCacheIntegrationWithWorkflow:
         from app.graph import nodes as nodes_module
 
         fresh_cache = QueryCache(ttl_seconds=3600, max_size=100)
-        monkeypatch.setattr(nodes_module, "query_cache", fresh_cache)
-
         call_count = {"n": 0}
-
-        def mock_generate_sql(prompt: str):
-            call_count["n"] += 1
-            return {"sql_query": "SELECT 1", "explanation": "Mock", "error": None}
-
-        monkeypatch.setattr(nodes_module.llm_agent, "generate_sql", mock_generate_sql)
-        monkeypatch.setattr(
-            nodes_module.db_manager,
-            "execute_query",
-            lambda sql: ([], []),
-        )
+        self._apply_common_mocks(monkeypatch, nodes_module, fresh_cache, call_count, [])
 
         from app.graph.workflow import run_report_agent
 
-        asyncio.get_event_loop().run_until_complete(
-            run_report_agent("demo_user", "query one")
-        )
-        asyncio.get_event_loop().run_until_complete(
-            run_report_agent("demo_user", "query two")
-        )
+        asyncio.get_event_loop().run_until_complete(run_report_agent("demo_user", "query one"))
+        asyncio.get_event_loop().run_until_complete(run_report_agent("demo_user", "query two"))
 
         assert call_count["n"] == 2, "Two different queries must each call the LLM once"
 
@@ -245,29 +255,13 @@ class TestCacheIntegrationWithWorkflow:
         from app.graph import nodes as nodes_module
 
         fresh_cache = QueryCache(ttl_seconds=1, max_size=100)
-        monkeypatch.setattr(nodes_module, "query_cache", fresh_cache)
-
         call_count = {"n": 0}
-
-        def mock_generate_sql(prompt: str):
-            call_count["n"] += 1
-            return {"sql_query": "SELECT 1", "explanation": "Mock", "error": None}
-
-        monkeypatch.setattr(nodes_module.llm_agent, "generate_sql", mock_generate_sql)
-        monkeypatch.setattr(
-            nodes_module.db_manager,
-            "execute_query",
-            lambda sql: ([], []),
-        )
+        self._apply_common_mocks(monkeypatch, nodes_module, fresh_cache, call_count, [])
 
         from app.graph.workflow import run_report_agent
 
-        asyncio.get_event_loop().run_until_complete(
-            run_report_agent("demo_user", "ttl test query")
-        )
+        asyncio.get_event_loop().run_until_complete(run_report_agent("demo_user", "ttl test query"))
         time.sleep(1.2)  # let TTL expire
-        asyncio.get_event_loop().run_until_complete(
-            run_report_agent("demo_user", "ttl test query")
-        )
+        asyncio.get_event_loop().run_until_complete(run_report_agent("demo_user", "ttl test query"))
 
         assert call_count["n"] == 2, "After TTL expires, LLM must be called again"

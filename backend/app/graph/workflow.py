@@ -3,6 +3,8 @@ from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
 
+from app.config import settings
+
 from app.graph.nodes import (
     cache_lookup_node,
     cache_store_node,
@@ -10,7 +12,9 @@ from app.graph.nodes import (
     clarification_node,
     error_handler_node,
     execution_engine_node,
+    greeting_node,
     increment_retry_execution_node,
+    increment_retry_test_node,
     increment_retry_validation_node,
     intent_detector_node,
     llm_node,
@@ -23,8 +27,10 @@ from app.graph.nodes import (
     result_formatter_node,
     route_after_execution,
     route_after_intent_detection,
+    route_after_sql_test,
     route_after_validation,
     sql_agent_node,
+    sql_test_node,
     sql_validator_node,
 )
 from app.graph.state import AgentState
@@ -50,13 +56,16 @@ def build_workflow():
     graph.add_node("load_context",               load_context_node)
     graph.add_node("cache_lookup",               cache_lookup_node)
     graph.add_node("intent_detector",            intent_detector_node)
+    graph.add_node("greeting",                   greeting_node)
     graph.add_node("off_topic",                  off_topic_node)
     graph.add_node("clarification",              clarification_node)
     graph.add_node("prompt_builder",             prompt_builder_node)
     graph.add_node("llm",                        llm_node)
     graph.add_node("sql_agent",                  sql_agent_node)
     graph.add_node("sql_validator",              sql_validator_node)
-    graph.add_node("cache_write",                cache_write_node)       # NEW
+    graph.add_node("sql_test",                   sql_test_node)
+    graph.add_node("increment_retry_test",       increment_retry_test_node)
+    graph.add_node("cache_write",                cache_write_node)
     graph.add_node("increment_retry_validation", increment_retry_validation_node)
     graph.add_node("execution_engine",           execution_engine_node)
     graph.add_node("increment_retry_execution",  increment_retry_execution_node)
@@ -81,11 +90,13 @@ def build_workflow():
         "intent_detector",
         route_after_intent_detection,
         {
+            "greeting":       "greeting",
             "off_topic":      "off_topic",
             "clarification":  "clarification",
             "prompt_builder": "prompt_builder",
         },
     )
+    graph.add_edge("greeting",      END)
     graph.add_edge("off_topic",     END)
     graph.add_edge("clarification", END)
 
@@ -94,17 +105,28 @@ def build_workflow():
     graph.add_edge("llm",            "sql_agent")
     graph.add_edge("sql_agent",      "sql_validator")
 
-    # ── After validation: cache valid SQL, then execute; retry/stop on failure ─
+    # ── After validation: dry-run test, then cache + execute; retry/stop on failure ─
     graph.add_conditional_edges(
         "sql_validator",
         route_after_validation,
         {
-            "execute": "cache_write",               # cache → execution_engine
+            "execute": "sql_test",                  # validated → LIMIT 0 dry-run
             "retry":   "increment_retry_validation",
             "stop":    "error_handler",
         },
     )
-    graph.add_edge("cache_write",                "execution_engine")   # NEW edge
+    # sql_test: pass → cache → execute; fail → retry or stop
+    graph.add_conditional_edges(
+        "sql_test",
+        route_after_sql_test,
+        {
+            "cache": "cache_write",
+            "retry": "increment_retry_test",
+            "stop":  "error_handler",
+        },
+    )
+    graph.add_edge("increment_retry_test",       "prompt_builder")
+    graph.add_edge("cache_write",                "execution_engine")
     graph.add_edge("increment_retry_validation", "prompt_builder")
 
     # ── After execution ───────────────────────────────────────────────────────
@@ -177,6 +199,7 @@ def _base_state(extra: Dict[str, Any]) -> AgentState:
         "intent_track":        "",
         "intent_confidence":   0.0,
         "intent_reasoning":    "",
+        "greeting_message":    "",
         "off_topic_reason":    "",
         "off_topic_message":   "",
         "clarification_round": 0,
@@ -186,8 +209,18 @@ def _base_state(extra: Dict[str, Any]) -> AgentState:
         "prior_followup":      "",
         "extracted_filters":   {},
         "enriched_prompt":     "",
-        "refresh_mode":        False,
-        "refreshed_at":        "",
+        "refresh_mode":          False,
+        "refreshed_at":          "",
+        # SQL test execution
+        "test_execution_passed": False,
+        "test_execution_error":  "",
+        # Pagination
+        "page":          1,
+        "page_size":     settings.PAGE_SIZE,
+        "total_rows":    0,
+        "total_pages":   1,
+        "has_next_page": False,
+        "has_prev_page": False,
     }
     defaults.update(extra)
     return defaults
@@ -228,6 +261,8 @@ async def run_intent_report(
     prior_followup: str = "",
     session_id: str = "",
     debug: bool = False,
+    page: int = 1,
+    page_size: int = 0,
 ) -> Dict[str, Any]:
     """Intent-aware entry point used by /report/generate and /report/clarify."""
     initial = _base_state({
@@ -238,6 +273,8 @@ async def run_intent_report(
         "prior_followup":      prior_followup,
         "session_id":          session_id,
         "debug":               debug,
+        "page":                page,
+        "page_size":           page_size or settings.PAGE_SIZE,
     })
     try:
         final: AgentState = await _workflow.ainvoke(initial)
@@ -259,15 +296,22 @@ async def run_intent_report(
                 "execution_time": 0.0, "error": f"Pipeline error: {exc}"}
 
 
-async def run_refresh_agent(session_id: str, user_id: str) -> Dict[str, Any]:
+async def run_refresh_agent(
+    session_id: str,
+    user_id: str,
+    page: int = 1,
+    page_size: int = 0,
+) -> Dict[str, Any]:
     """
     Refresh-only entry point — reads cached SQL from Redis and executes it
     directly.  Never calls any LLM, prompt builder, validator, or RBAC node.
     """
     initial = _base_state({
-        "session_id":  session_id,
-        "user_id":     user_id,
+        "session_id":   session_id,
+        "user_id":      user_id,
         "refresh_mode": True,
+        "page":         page,
+        "page_size":    page_size or settings.PAGE_SIZE,
     })
     try:
         final: AgentState = await _refresh_workflow.ainvoke(initial)

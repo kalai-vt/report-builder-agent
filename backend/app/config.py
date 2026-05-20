@@ -32,8 +32,8 @@ class Settings:
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0"))
 
     MAX_QUERY_TIMEOUT: int = int(os.getenv("MAX_QUERY_TIMEOUT", "30"))
-    MAX_RESULT_ROWS: int = int(os.getenv("MAX_RESULT_ROWS", "1000"))
-    DEFAULT_RESULT_LIMIT: int = int(os.getenv("DEFAULT_RESULT_LIMIT", "100"))
+    PAGE_SIZE: int = int(os.getenv("PAGE_SIZE", "1000"))        # rows per page (default & max)
+    MAX_PAGE_SIZE: int = int(os.getenv("MAX_PAGE_SIZE", "1000"))  # hard cap per request
     MAX_RETRY_COUNT: int = int(os.getenv("MAX_RETRY_COUNT", "2"))
 
     MAX_CONVERSATION_HISTORY: int = int(os.getenv("MAX_CONVERSATION_HISTORY", "10"))

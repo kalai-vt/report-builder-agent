@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -13,6 +14,19 @@ from app.services.session_store import session_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Matches messages that are purely a filter/sort action on existing data
+# e.g. "filter by location LOC001", "show only completed", "narrow to Q1"
+_FILTER_REDIRECT_RE = re.compile(
+    r"^\s*(filter\s+(by|to|for)|show\s+only|narrow\s+(by|to)|only\s+show|sort\s+by|group\s+by)\b",
+    re.IGNORECASE,
+)
+
+_FILTER_REDIRECT_MSG = (
+    "Use the filter controls above the results to narrow down the data — "
+    "no need to re-run the report. "
+    "Your full result set is already loaded and filters apply instantly."
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Existing models (unchanged)
@@ -63,10 +77,29 @@ class GenerateRequest(BaseModel):
         "employee",
         description="Role of the requesting user: employee | lead | manager | hr",
     )
+    page: int = Field(1, ge=1, description="Page number (1-based)")
+    page_size: int = Field(
+        0,
+        ge=0,
+        description="Rows per page (0 = use server default, max capped by MAX_PAGE_SIZE)",
+    )
+    has_data: bool = Field(
+        False,
+        description=(
+            "Set to True when the frontend already has a result set displayed. "
+            "Enables client-side filter redirect: if the query is a pure filter action "
+            "(e.g. 'filter by location X'), the agent will redirect to UI controls "
+            "instead of re-running the report."
+        ),
+    )
 
     class Config:
         json_schema_extra = {
-            "example": {"query": "show my goals", "user_id": "user_42", "user_role": "employee"}
+            "example": {
+                "query": "show my goals", "user_id": "user_42",
+                "user_role": "employee", "page": 1, "page_size": 1000,
+                "has_data": False,
+            }
         }
 
 
@@ -88,7 +121,7 @@ class ClarifyRequest(BaseModel):
 
 
 class ReportResponse(BaseModel):
-    status: str = Field(..., description="off_topic | clarification_needed | success | error")
+    status: str = Field(..., description="greeting | off_topic | filter_redirect | clarification_needed | success | error")
 
     # Track A
     message: Optional[str] = None
@@ -112,6 +145,29 @@ class ReportResponse(BaseModel):
     error: Optional[str] = None
     cache_hit: Optional[bool] = None
 
+    # Client-side filter metadata — returned with every data response
+    filterable_columns: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Columns the frontend can filter on. Each entry has: "
+            "column, label, filter_type (categorical|date_range|text_search|numeric_range), values."
+        ),
+    )
+    filter_instruction: Optional[str] = Field(
+        None, description="Always 'client_side_only' — filters never trigger a new SQL execution."
+    )
+    llm_call_on_filter: Optional[bool] = Field(
+        None, description="Always false — applying a filter must not trigger a new LLM call."
+    )
+
+    # Pagination metadata (present on success responses)
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+    total_rows: Optional[int] = None
+    total_pages: Optional[int] = None
+    has_next_page: Optional[bool] = None
+    has_prev_page: Optional[bool] = None
+
     # Refresh metadata
     refresh_mode: Optional[bool] = None
     refreshed_at: Optional[str] = None
@@ -133,11 +189,16 @@ def _build_report_response(
     session_id: str,
     original_prompt: str,
 ) -> ReportResponse:
+    if status == "greeting":
+        return ReportResponse(
+            status="greeting",
+            message=result.get("message", ""),
+            session_id=session_id,
+        )
     if status == "off_topic":
         return ReportResponse(
             status="off_topic",
             message=result.get("message", ""),
-            suggestions=result.get("suggestions", []),
             session_id=session_id,
         )
     if status == "clarification_needed":
@@ -157,11 +218,20 @@ def _build_report_response(
         explanation=result.get("explanation"),
         dimensions=result.get("dimensions", []),
         recommended_column_filters=result.get("recommended_column_filters", []),
+        filterable_columns=result.get("filterable_columns", []),
+        filter_instruction=result.get("filter_instruction", "client_side_only"),
+        llm_call_on_filter=result.get("llm_call_on_filter", False),
         data=result.get("data", []),
         row_count=result.get("row_count", 0),
         execution_time=result.get("execution_time", 0.0),
         error=result.get("error"),
         cache_hit=result.get("cache_hit", False),
+        page=result.get("page", 1),
+        page_size=result.get("page_size", settings.PAGE_SIZE),
+        total_rows=result.get("total_rows", result.get("row_count", 0)),
+        total_pages=result.get("total_pages", 1),
+        has_next_page=result.get("has_next_page", False),
+        has_prev_page=result.get("has_prev_page", False),
         session_id=session_id,
     )
 
@@ -234,7 +304,8 @@ async def run_query(request: QueryRequest):
     summary="Intent-Aware Report Generation",
     description=(
         "Submit a natural language query. Returns one of:\n\n"
-        "- **off_topic** — not a KRA question\n"
+        "- **greeting** — social/conversational opener; warm reply + report suggestion\n"
+        "- **off_topic** — unrelated to KRA; polite decline + redirect\n"
         "- **clarification_needed** — missing info; one follow-up question returned\n"
         "- **success** — SQL executed, data returned\n\n"
         "The returned `session_id` enables `/report/clarify`, "
@@ -252,6 +323,20 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
         }
         session_id = session_store.create(session_data)
 
+        # Short-circuit: if the frontend has data loaded and the user is asking
+        # to filter/sort via chat, redirect them to the UI filter controls.
+        # No LLM call, no SQL execution — the result set is already in the browser.
+        if request.has_data and _FILTER_REDIRECT_RE.match(request.query):
+            logger.info(
+                f"[generate] filter_redirect user={request.user_id} "
+                f"query={request.query[:60]!r}"
+            )
+            return ReportResponse(
+                status="filter_redirect",
+                message=_FILTER_REDIRECT_MSG,
+                session_id=session_id,
+            )
+
         result = await run_intent_report(
             user_id=request.user_id,
             query=request.query,
@@ -259,6 +344,8 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
             clarification_round=0,
             prior_followup="",
             session_id=session_id,
+            page=request.page,
+            page_size=request.page_size,
         )
 
         status = result.get("status", "success")
@@ -354,9 +441,11 @@ async def refresh_report(
     session_id: str,
     user_id: str = Query(..., description="Must match the user_id from /report/generate"),
     user_role: str = Query("employee"),
+    page: int = Query(1, ge=1, description="Page number to refresh (default 1)"),
+    page_size: int = Query(0, ge=0, description="Rows per page (0 = server default)"),
 ) -> ReportResponse:
     try:
-        result = await run_refresh_agent(session_id=session_id, user_id=user_id)
+        result = await run_refresh_agent(session_id=session_id, user_id=user_id, page=page, page_size=page_size)
         error_code = result.get("error_code")
 
         if error_code == "SESSION_EXPIRED":
@@ -379,12 +468,80 @@ async def refresh_report(
             error=result.get("error"),
             refresh_mode=True,
             refreshed_at=result.get("refreshed_at"),
+            page=result.get("page", page),
+            page_size=result.get("page_size", settings.PAGE_SIZE),
+            total_rows=result.get("total_rows", result.get("row_count", 0)),
+            total_pages=result.get("total_pages", 1),
+            has_next_page=result.get("has_next_page", False),
+            has_prev_page=result.get("has_prev_page", False),
             session_id=session_id,
         )
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception(f"[refresh] error session={session_id}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pagination — fetch a specific page of a previously generated report
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/report/page/{session_id}",
+    response_model=ReportResponse,
+    summary="Fetch a Specific Page of Report Results",
+    description=(
+        "Re-executes the cached SQL with the requested page offset. "
+        "No LLM or validator calls — uses the same security-validated SQL "
+        "stored by `/report/generate`.\n\n"
+        "**Use `has_next_page` from the previous response to decide whether to call this.**"
+    ),
+)
+async def get_report_page(
+    session_id: str,
+    user_id: str = Query(..., description="Must match the user_id from /report/generate"),
+    page: int = Query(2, ge=1, description="Page number (1-based, must be > 1 for new data)"),
+    page_size: int = Query(0, ge=0, description="Rows per page (0 = server default)"),
+) -> ReportResponse:
+    try:
+        result = await run_refresh_agent(
+            session_id=session_id,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+        )
+        error_code = result.get("error_code")
+
+        if error_code == "SESSION_EXPIRED":
+            raise HTTPException(status_code=404, detail="SESSION_EXPIRED: Please regenerate the report.")
+        if error_code == "ACCESS_DENIED":
+            raise HTTPException(status_code=403, detail="ACCESS_DENIED: User does not match session owner.")
+        if error_code == "SCHEMA_CHANGED":
+            raise HTTPException(status_code=409, detail="SCHEMA_CHANGED: Schema has changed. Please regenerate.")
+        if error_code:
+            raise HTTPException(status_code=500, detail=result.get("message", error_code))
+
+        return ReportResponse(
+            status=result.get("status", "success"),
+            explanation=result.get("explanation"),
+            dimensions=result.get("dimensions", []),
+            recommended_column_filters=result.get("recommended_column_filters", []),
+            data=result.get("data", []),
+            row_count=result.get("row_count", 0),
+            execution_time=result.get("execution_time", 0.0),
+            page=result.get("page", page),
+            page_size=result.get("page_size", settings.PAGE_SIZE),
+            total_rows=result.get("total_rows", 0),
+            total_pages=result.get("total_pages", 1),
+            has_next_page=result.get("has_next_page", False),
+            has_prev_page=result.get("has_prev_page", False),
+            session_id=session_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[page] error session={session_id} page={page}: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 

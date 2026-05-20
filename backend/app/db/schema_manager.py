@@ -58,6 +58,11 @@ class SchemaManager:
         self._schema_cache = schema
         self._schema_loaded = True
         logger.info(f"Schema refreshed: {len(schema)} tables")
+
+        # Invalidate suggestion cache so next greeting/off-topic call rebuilds
+        from app.services.suggestion_builder import suggestion_builder  # lazy import
+        suggestion_builder.invalidate()
+
         return schema
 
     def get_schema(self) -> Dict:

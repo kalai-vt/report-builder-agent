@@ -254,21 +254,38 @@ def increment_retry_execution_node(state: AgentState) -> Dict[str, Any]:
 # ─────────────────────────────────────────────
 
 def execution_engine_node(state: AgentState) -> Dict[str, Any]:
-    sql = state.get("refined_sql", "")
+    sql       = state.get("refined_sql", "")
+    page      = state.get("page", 1)
+    page_size = state.get("page_size", settings.PAGE_SIZE)
+    # Bind :employee_id from the session token so the LLM never needs to
+    # hardcode user IDs — the placeholder is resolved safely by the DB driver.
+    bound_params = {"employee_id": state.get("user_id", "")}
     t0 = time.time()
     try:
-        rows, columns = db_manager.execute_query(sql)
+        rows, columns, total_rows, total_pages = db_manager.execute_paginated(
+            sql, page=page, page_size=page_size, params=bound_params
+        )
         duration = round(time.time() - t0, 4)
         step = {
             "node": "execution_engine",
             "status": "success",
             "row_count": len(rows),
+            "total_rows": total_rows,
+            "page": page,
+            "total_pages": total_pages,
             "duration_ms": round(duration * 1000, 1),
         }
-        logger.info(f"[execution_engine] user={state['user_id']} rows={len(rows)} ms={step['duration_ms']}")
+        logger.info(
+            f"[execution_engine] user={state['user_id']} rows={len(rows)} "
+            f"total={total_rows} page={page}/{total_pages} ms={step['duration_ms']}"
+        )
         return {
             "execution_result": {"rows": rows, "columns": columns, "error": None},
             "execution_time": duration,
+            "total_rows":  total_rows,
+            "total_pages": total_pages,
+            "has_next_page": page < total_pages,
+            "has_prev_page": page > 1,
             "steps": _steps(state) + [step],
         }
     except Exception as e:
@@ -283,6 +300,10 @@ def execution_engine_node(state: AgentState) -> Dict[str, Any]:
         return {
             "execution_result": {"rows": [], "columns": [], "error": str(e)},
             "execution_time": duration,
+            "total_rows": 0,
+            "total_pages": 1,
+            "has_next_page": False,
+            "has_prev_page": False,
             "steps": _steps(state) + [step],
         }
 
@@ -309,29 +330,49 @@ def result_formatter_node(state: AgentState) -> Dict[str, Any]:
     # Columns without aggregate keywords → dimensions
     dimensions = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
 
-    recommended_column_filters = filter_recommender.recommended_column_filters(
-        rows=rows,
-        columns=columns,
-    )
+    filterable_cols = filter_recommender.filterable_columns(rows=rows, columns=columns)
+    # Keep the legacy flat list for any consumers that still reference it
+    recommended_column_filters = [fc["column"] for fc in filterable_cols]
+
+    page        = state.get("page", 1)
+    page_size   = state.get("page_size", settings.PAGE_SIZE)
+    total_rows  = state.get("total_rows", len(rows))
+    total_pages = state.get("total_pages", 1)
 
     formatted = {
         "sql_query": state.get("refined_sql", ""),
         "explanation": llm_resp.get("explanation", ""),
         "dimensions": dimensions,
         "recommended_column_filters": recommended_column_filters,
+        "filterable_columns": filterable_cols,
+        "filter_instruction": "client_side_only",
+        "llm_call_on_filter": False,
         "data": rows,
         "row_count": len(rows),
         "execution_time": state.get("execution_time", 0.0),
+        # Pagination metadata
+        "page":          page,
+        "page_size":     page_size,
+        "total_rows":    total_rows,
+        "total_pages":   total_pages,
+        "has_next_page": state.get("has_next_page", False),
+        "has_prev_page": state.get("has_prev_page", False),
     }
 
     step = {
         "node": "result_formatter",
         "status": "success",
         "row_count": len(rows),
-        "filter_columns": len(recommended_column_filters),
+        "total_rows": total_rows,
+        "page": page,
+        "total_pages": total_pages,
+        "filter_columns": len(filterable_cols),
         "duration_ms": round((time.time() - t0) * 1000, 1),
     }
-    logger.info(f"[result_formatter] user={state['user_id']} rows={len(rows)} filter_cols={len(recommended_column_filters)}")
+    logger.info(
+        f"[result_formatter] user={state['user_id']} rows={len(rows)} "
+        f"total={total_rows} page={page}/{total_pages} filter_cols={len(filterable_cols)}"
+    )
     return {"formatted_result": formatted, "steps": _steps(state) + [step]}
 
 
@@ -451,6 +492,7 @@ def intent_detector_node(state: AgentState) -> Dict[str, Any]:
         "intent_track": result["track"],
         "intent_confidence": result["confidence"],
         "intent_reasoning": result.get("reasoning", ""),
+        "greeting_message": result.get("greeting_message") or "",
         "off_topic_reason": result.get("off_topic_reason") or "",
         "off_topic_message": result.get("polite_block_message") or "",
         "follow_up_question": result.get("follow_up_question") or "",
@@ -462,24 +504,37 @@ def intent_detector_node(state: AgentState) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
-# Node: Off-Topic Handler (NEW — Track A)
+# Node: Greeting Handler (Track A — greeting)
+# ─────────────────────────────────────────────
+
+def greeting_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    message = state.get("greeting_message", "")
+    formatted = {
+        "status": "greeting",
+        "message": message,
+        "suggestions": [],
+    }
+    step = {
+        "node": "greeting",
+        "status": "success",
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(f"[greeting] user={state['user_id']}")
+    return {"formatted_result": formatted, "steps": _steps(state) + [step]}
+
+
+# ─────────────────────────────────────────────
+# Node: Off-Topic Handler (Track B — off_topic)
 # ─────────────────────────────────────────────
 
 def off_topic_node(state: AgentState) -> Dict[str, Any]:
     t0 = time.time()
     message = state.get("off_topic_message", "")
-
-    # Extract bullet-point suggestions from the polite block message
-    suggestions = [
-        line.lstrip("•").strip()
-        for line in message.splitlines()
-        if line.strip().startswith("•")
-    ]
-
     formatted = {
         "status": "off_topic",
         "message": message,
-        "suggestions": suggestions,
+        "suggestions": [],
     }
     step = {
         "node": "off_topic",
@@ -518,6 +573,67 @@ def clarification_node(state: AgentState) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
+# Node: SQL Test Execution (LIMIT 0 dry-run)
+# Runs between sql_validator and cache_write.
+# Catches schema/syntax errors before any rows
+# are fetched and feeds the DB error back to the
+# LLM for targeted self-correction.
+# ─────────────────────────────────────────────
+
+def sql_test_node(state: AgentState) -> Dict[str, Any]:
+    sql     = state.get("refined_sql", "")
+    user_id = state.get("user_id", "")
+    bound   = {"employee_id": user_id}
+    t0      = time.time()
+
+    passed, error = db_manager.test_execute(sql, bound)
+    duration_ms   = round((time.time() - t0) * 1000, 1)
+
+    step = {
+        "node":        "sql_test",
+        "status":      "passed" if passed else "failed",
+        "duration_ms": duration_ms,
+    }
+    if not passed:
+        step["error"] = error
+
+    if passed:
+        logger.info(f"[sql_test] PASSED user={user_id} ms={duration_ms}")
+        return {
+            "test_execution_passed": True,
+            "test_execution_error":  "",
+            "steps": _steps(state) + [step],
+        }
+
+    logger.warning(f"[sql_test] FAILED user={user_id}: {error}")
+    return {
+        "test_execution_passed": False,
+        "test_execution_error":  error,
+        "steps": _steps(state) + [step],
+    }
+
+
+# ─────────────────────────────────────────────
+# Node: Increment Retry — Test Failure
+# Counts the failed attempt and builds targeted
+# feedback so the LLM can fix the offending SQL.
+# ─────────────────────────────────────────────
+
+def increment_retry_test_node(state: AgentState) -> Dict[str, Any]:
+    new_count = state.get("retry_count", 0) + 1
+    error     = state.get("test_execution_error", "Unknown test error")
+    feedback  = (
+        f"SQL dry-run (LIMIT 0) failed with error:\n{error}\n\n"
+        f"Fix ONLY using table and column names defined in the schema above.\n"
+        f"Failed SQL:\n{state.get('refined_sql', '')}"
+    )
+    logger.warning(
+        f"[retry_test] user={state['user_id']} attempt={new_count} error={error[:120]}"
+    )
+    return {"retry_count": new_count, "retry_feedback": feedback}
+
+
+# ─────────────────────────────────────────────
 # Conditional Edge Functions
 # ─────────────────────────────────────────────
 
@@ -535,6 +651,14 @@ def route_after_validation(state: AgentState) -> str:
     return "stop"
 
 
+def route_after_sql_test(state: AgentState) -> str:
+    if state.get("test_execution_passed"):
+        return "cache"
+    if state.get("retry_count", 0) < settings.MAX_RETRY_COUNT:
+        return "retry"
+    return "stop"
+
+
 def route_after_execution(state: AgentState) -> str:
     exec_error = state.get("execution_result", {}).get("error")
     retry_count = state.get("retry_count", 0)
@@ -548,6 +672,8 @@ def route_after_execution(state: AgentState) -> str:
 
 def route_after_intent_detection(state: AgentState) -> str:
     track = state.get("intent_track", "clear")
+    if track == "greeting":
+        return "greeting"
     if track == "off_topic":
         return "off_topic"
     if track == "incomplete":
@@ -642,9 +768,15 @@ def refresh_execution_node(state: AgentState) -> Dict[str, Any]:
             }
         }
 
+    page      = state.get("page", 1)
+    page_size = state.get("page_size", settings.PAGE_SIZE)
+    bound_params = {"employee_id": request_user_id}
+
     # ── 4. Execute against MySQL ──────────────────────────────────────────────
     try:
-        rows, columns = db_manager.execute_query(secured_sql)
+        rows, columns, total_rows, total_pages = db_manager.execute_paginated(
+            secured_sql, page=page, page_size=page_size, params=bound_params
+        )
     except OperationalError as exc:
         logger.error(f"[refresh] SCHEMA_CHANGED session={session_id[:16]}: {exc}")
         sql_cache.delete(session_id)
@@ -666,11 +798,18 @@ def refresh_execution_node(state: AgentState) -> Dict[str, Any]:
         }
 
     duration = round(time.time() - t0, 4)
-    logger.info(f"[refresh] executed session={session_id[:16]} rows={len(rows)} ms={round(duration*1000,1)}")
+    logger.info(
+        f"[refresh] executed session={session_id[:16]} rows={len(rows)} "
+        f"total={total_rows} page={page}/{total_pages} ms={round(duration*1000,1)}"
+    )
     return {
         "execution_result": {"rows": rows, "columns": columns, "error": None},
         "execution_time": duration,
         "refined_sql": secured_sql,
+        "total_rows":    total_rows,
+        "total_pages":   total_pages,
+        "has_next_page": page < total_pages,
+        "has_prev_page": page > 1,
         # Minimal llm_response so response_node can format cleanly
         "llm_response": {"explanation": "Live data refresh", "columns": columns, "filters": []},
     }
@@ -696,10 +835,15 @@ def response_node(state: AgentState) -> Dict[str, Any]:
     rows: list = exec_result.get("rows", [])
     columns: list = exec_result.get("columns", [])
 
-    dimensions = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
-    recommended_filters = filter_recommender.recommended_column_filters(rows=rows, columns=columns)
+    dimensions      = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
+    filterable_cols = filter_recommender.filterable_columns(rows=rows, columns=columns)
+    recommended_filters = [fc["column"] for fc in filterable_cols]
 
     refreshed_at = datetime.now(timezone.utc).isoformat()
+    page         = state.get("page", 1)
+    page_size    = state.get("page_size", settings.PAGE_SIZE)
+    total_rows   = state.get("total_rows", len(rows))
+    total_pages  = state.get("total_pages", 1)
 
     formatted = {
         "status": "success",
@@ -707,15 +851,25 @@ def response_node(state: AgentState) -> Dict[str, Any]:
         "explanation": llm_resp.get("explanation", "Live data refresh"),
         "dimensions": dimensions,
         "recommended_column_filters": recommended_filters,
+        "filterable_columns": filterable_cols,
+        "filter_instruction": "client_side_only",
+        "llm_call_on_filter": False,
         "data": rows,
         "row_count": len(rows),
         "execution_time": state.get("execution_time", 0.0),
         "refresh_mode": True,
         "refreshed_at": refreshed_at,
         "cache_hit": False,
+        # Pagination metadata
+        "page":          page,
+        "page_size":     page_size,
+        "total_rows":    total_rows,
+        "total_pages":   total_pages,
+        "has_next_page": state.get("has_next_page", False),
+        "has_prev_page": state.get("has_prev_page", False),
     }
 
-    logger.info(f"[response] refresh formatted rows={len(rows)} at={refreshed_at}")
+    logger.info(f"[response] refresh formatted rows={len(rows)} total={total_rows} page={page}/{total_pages} at={refreshed_at}")
     return {
         "formatted_result": formatted,
         "refresh_mode": True,
