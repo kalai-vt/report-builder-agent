@@ -1,0 +1,29 @@
+{
+  "name": "ai-report-builder",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-table": "^8.20.5",
+    "axios": "^1.7.9",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "xlsx": "^0.18.5",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.45",
+    "tailwindcss": "^3.4.10",
+    "vite": "^5.4.2"
+  }
+}
