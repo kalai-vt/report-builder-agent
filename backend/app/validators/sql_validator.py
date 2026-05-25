@@ -32,10 +32,16 @@ _FROM_CLAUSE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Matches trailing LIMIT [n] OFFSET [m] or LIMIT [n],[m] at the end of a query.
-# Only strips the outermost LIMIT (not LIMIT inside subqueries).
-_TRAILING_LIMIT_RE = re.compile(
-    r"\s+LIMIT\s+\d+(\s*,\s*\d+|\s+OFFSET\s+\d+)?\s*$",
+# Matches trailing LIMIT n OFFSET m  or  LIMIT n,m  (pagination-style — both parts present).
+# A bare "LIMIT n" without OFFSET is a user-requested row cap and is intentionally preserved.
+_PAGINATION_LIMIT_RE = re.compile(
+    r"\s+LIMIT\s+\d+\s*(,\s*\d+|OFFSET\s+\d+)\s*$",
+    re.IGNORECASE,
+)
+
+# Extracts a bare trailing LIMIT n (no OFFSET) — kept for reference in _strip_limit_offset.
+_BARE_LIMIT_RE = re.compile(
+    r"\s+LIMIT\s+\d+\s*$",
     re.IGNORECASE,
 )
 
@@ -54,7 +60,8 @@ class SQLValidator:
         if not _SELECT_RE.match(sql):
             return ValidationStatus.UNSAFE, "Only SELECT statements are permitted", sql
 
-        # Strip any LIMIT/OFFSET the LLM injected — pagination is applied externally
+        # Strip pagination-style LIMIT (LIMIT n OFFSET m / LIMIT n,m) injected by the LLM.
+        # A bare LIMIT n without OFFSET is a user-requested row cap and is preserved.
         sql = self._strip_limit_offset(sql)
 
         if self._has_cartesian_join(sql):
@@ -77,8 +84,9 @@ class SQLValidator:
         return sql.strip().rstrip(";")
 
     def _strip_limit_offset(self, sql: str) -> str:
-        """Remove trailing LIMIT / OFFSET so the pagination layer controls row windows."""
-        return _TRAILING_LIMIT_RE.sub("", sql).strip()
+        """Remove pagination-style LIMIT (with OFFSET) injected by the LLM.
+        A bare LIMIT n (no OFFSET) is a user-requested row cap and is kept intact."""
+        return _PAGINATION_LIMIT_RE.sub("", sql).strip()
 
     def _has_cartesian_join(self, sql: str) -> bool:
         m = _FROM_CLAUSE_RE.search(sql)

@@ -22,6 +22,16 @@ _FILTER_REDIRECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches explicit row-count requests: "top 10", "first 5", "bottom 20"
+# Deliberately excludes "last N" — usually means a time period ("last 30 days").
+_TOP_N_RE = re.compile(r"\b(?:top|first|bottom)\s+(\d+)\b", re.IGNORECASE)
+
+
+def _extract_user_limit(query: str) -> int:
+    """Return the explicit N from 'top N' / 'first N' / 'bottom N', else 0."""
+    m = _TOP_N_RE.search(query)
+    return int(m.group(1)) if m else 0
+
 _FILTER_REDIRECT_MSG = (
     "Use the filter controls above the results to narrow down the data — "
     "no need to re-run the report. "
@@ -337,6 +347,9 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
                 session_id=session_id,
             )
 
+        user_limit = _extract_user_limit(request.query)
+        effective_page_size = user_limit if user_limit > 0 else (request.page_size or settings.PAGE_SIZE)
+
         result = await run_intent_report(
             user_id=request.user_id,
             query=request.query,
@@ -345,8 +358,23 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
             prior_followup="",
             session_id=session_id,
             page=request.page,
-            page_size=request.page_size,
+            page_size=effective_page_size,
         )
+
+        # Enforce top-N: cap the result to exactly N rows and show LIMIT N in the SQL.
+        logger.info(f"[generate] user_limit={user_limit} status={result.get('status')} data_rows={len(result.get('data') or [])}")
+        if user_limit > 0 and result.get("status") not in ("clarification_needed", "greeting", "off_topic"):
+            data = result.get("data") or []
+            if len(data) > user_limit:
+                result["data"] = data[:user_limit]
+                result["row_count"] = user_limit
+                result["total_rows"] = user_limit
+                result["total_pages"] = 1
+                result["has_next_page"] = False
+            sql_q = result.get("sql_query") or ""
+            if sql_q and not re.search(r"\bLIMIT\b", sql_q, re.IGNORECASE):
+                result["sql_query"] = f"{sql_q} LIMIT {user_limit}"
+            logger.info(f"[generate] after top-N cap: data_rows={len(result.get('data') or [])} sql_has_limit={'LIMIT' in (result.get('sql_query') or '').upper()}")
 
         status = result.get("status", "success")
 
@@ -595,6 +623,11 @@ async def stream_report(
 # ─────────────────────────────────────────────────────────────────────────────
 # Cache management endpoints (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/debug/top-n", summary="Debug top-N extraction")
+async def debug_top_n(query: str = Query(...)):
+    limit = _extract_user_limit(query)
+    return {"query": query, "extracted_limit": limit, "code_version": "v2-safety-net"}
 
 @router.get("/cache/stats", summary="Cache statistics")
 async def get_cache_stats():

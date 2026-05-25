@@ -1,7 +1,12 @@
 import logging
 import math
+import re
 from contextlib import contextmanager
 from typing import List, Tuple
+
+# Bare trailing LIMIT n (no OFFSET) — set by the LLM for user-requested top-N queries.
+# When present the query is executed as-is; no extra pagination LIMIT is appended.
+_BARE_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\s*$", re.IGNORECASE)
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -86,25 +91,36 @@ class DatabaseManager:
     ) -> Tuple[List[dict], List[str], int, int]:
         """Execute a SELECT query with offset-based pagination.
 
+        If the SQL already ends with a bare LIMIT n (no OFFSET), the query was
+        generated for a user-requested top-N result.  It is executed directly so
+        the user's row cap is honoured exactly without adding extra pagination.
+
         Returns (rows, columns, total_rows, total_pages).
-        Bound parameters (e.g. {"employee_id": "E001"}) are passed through
-        to both the COUNT subquery and the paginated data query so named
-        placeholders like :employee_id are resolved safely by the DB driver.
         """
+        bound = params or {}
+
+        # ── User-requested top-N: SQL already has LIMIT n (no OFFSET) ─────────
+        if _BARE_LIMIT_RE.search(sql):
+            with self.engine.connect() as conn:
+                self._set_timeout(conn)
+                result  = conn.execute(text(sql), bound)
+                columns = list(result.keys())
+                rows    = [dict(zip(columns, row)) for row in result.fetchall()]
+            total_rows = len(rows)
+            logger.debug(f"[execute_paginated] top-N path rows={total_rows}")
+            return rows, columns, total_rows, 1
+
+        # ── Normal offset pagination ───────────────────────────────────────────
         page      = max(1, page)
         page_size = min(max(1, page_size), settings.MAX_PAGE_SIZE)
         offset    = (page - 1) * page_size
-        bound     = params or {}
 
         with self.engine.connect() as conn:
             self._set_timeout(conn)
 
-            # Total-row count via wrapping subquery (params forwarded so
-            # named placeholders inside the base SQL resolve correctly)
             count_sql  = f"SELECT COUNT(*) FROM ({sql}) AS _pag_count"
             total_rows = conn.execute(text(count_sql), bound).scalar() or 0
 
-            # Paginated data
             paged_sql  = f"{sql} LIMIT {page_size} OFFSET {offset}"
             result     = conn.execute(text(paged_sql), bound)
             columns    = list(result.keys())
