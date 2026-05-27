@@ -195,18 +195,25 @@ const useStore = create(
 
       // ─── Saved reports ──────────────────────────────────────────────────────
       saveReport: (name) => {
-        const { sessionId, currentPrompt, savedReports } = get()
-        if (!sessionId) return
+        const { sessionId, currentPrompt, sqlQuery, explanation, filterableColumns, savedReports } = get()
+        if (!sessionId || !sqlQuery) return
         const trimmedName = (name || currentPrompt).trim().slice(0, 80)
         const existing = savedReports.find((r) => r.sessionId === sessionId)
         if (existing) {
-          set({ savedReports: savedReports.map((r) => (r.sessionId === sessionId ? { ...r, name: trimmedName } : r)) })
+          set({
+            savedReports: savedReports.map((r) =>
+              r.sessionId === sessionId ? { ...r, name: trimmedName } : r
+            ),
+          })
           return
         }
         const newReport = {
           id: String(Date.now()),
           name: trimmedName,
           prompt: currentPrompt,
+          sqlQuery,
+          explanation,
+          filterableColumns,
           sessionId,
           savedAt: new Date().toISOString(),
         }
@@ -215,8 +222,31 @@ const useStore = create(
 
       loadSavedReport: async (saved) => {
         const { userId, userRole } = get()
+        if (!saved.sqlQuery) {
+          // Legacy saved report has no SQL — fall back to session refresh
+          set({
+            sessionId: saved.sessionId,
+            currentPrompt: saved.prompt,
+            isLoading: true,
+            error: null,
+            activeFilters: {},
+            clarification: null,
+            message: null,
+            suggestions: null,
+          })
+          try {
+            const res = await api.refreshReport(saved.sessionId, userId, userRole, 1, 0)
+            get()._handleResponse(res.data, null)
+          } catch (err) {
+            get()._handleError(err)
+          } finally {
+            set({ isLoading: false })
+          }
+          return
+        }
+
+        // Re-execute the saved SQL against live data — no LLM call, no session dependency
         set({
-          sessionId: saved.sessionId,
           currentPrompt: saved.prompt,
           isLoading: true,
           error: null,
@@ -226,8 +256,14 @@ const useStore = create(
           suggestions: null,
         })
         try {
-          const res = await api.refreshReport(saved.sessionId, userId, userRole, 1, 0)
-          get()._handleResponse(res.data, null)
+          const res = await api.replayReport({
+            sql_query: saved.sqlQuery,
+            user_id: userId,
+            user_role: userRole,
+            page: 1,
+            page_size: 0,
+          })
+          get()._handleResponse(res.data, saved.prompt)
         } catch (err) {
           get()._handleError(err)
         } finally {

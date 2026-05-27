@@ -1,4 +1,6 @@
 import logging
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
@@ -294,6 +296,80 @@ async def run_intent_report(
         logger.exception(f"[workflow] unhandled error user={user_id}: {exc}")
         return {"status": "success", "data": [], "row_count": 0,
                 "execution_time": 0.0, "error": f"Pipeline error: {exc}"}
+
+
+async def run_replay_agent(
+    sql_query: str,
+    user_id: str,
+    user_role: str = "employee",
+    page: int = 1,
+    page_size: int = 0,
+) -> Dict[str, Any]:
+    """
+    Execute a pre-saved SQL query and return fresh data.
+    No LLM, no prompt building — just validate → execute → format.
+    Used by POST /report/replay (Load Report from saved configuration).
+    """
+    from app.db.connection import db_manager
+    from app.services.filter_recommender import filter_recommender
+    from app.validators.sql_validator import ValidationStatus, sql_validator
+
+    _METRIC_KW = frozenset({
+        "count", "sum", "total", "avg", "average", "max", "min",
+        "amount", "revenue", "profit", "cost", "rate", "percentage",
+        "score", "salary", "budget",
+    })
+
+    effective_page_size = page_size or settings.PAGE_SIZE
+
+    # 1. Re-validate the saved SQL (safety guard)
+    status, message, clean_sql = sql_validator.validate(sql_query, user_id)
+    if status == ValidationStatus.UNSAFE:
+        logger.warning(f"[replay] unsafe SQL rejected user={user_id}: {message}")
+        return {"status": "error", "error": f"Unsafe query: {message}", "data": [], "row_count": 0}
+
+    # 2. Execute against MySQL
+    t0 = time.time()
+    bound_params = {"employee_id": user_id}
+    try:
+        rows, columns, total_rows, total_pages = db_manager.execute_paginated(
+            clean_sql, page=page, page_size=effective_page_size, params=bound_params
+        )
+    except Exception as exc:
+        logger.error(f"[replay] execution error user={user_id}: {exc}")
+        return {"status": "error", "error": f"Query execution failed: {exc}", "data": [], "row_count": 0}
+
+    duration = round(time.time() - t0, 4)
+
+    # 3. Format
+    dimensions = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
+    filterable_cols = filter_recommender.filterable_columns(rows=rows, columns=columns)
+
+    logger.info(
+        f"[replay] user={user_id} rows={len(rows)} total={total_rows} "
+        f"page={page}/{total_pages} ms={round(duration * 1000, 1)}"
+    )
+    return {
+        "status": "success",
+        "sql_query": clean_sql,
+        "explanation": "",
+        "dimensions": dimensions,
+        "recommended_column_filters": [fc["column"] for fc in filterable_cols],
+        "filterable_columns": filterable_cols,
+        "filter_instruction": "client_side_only",
+        "llm_call_on_filter": False,
+        "data": rows,
+        "row_count": len(rows),
+        "execution_time": duration,
+        "page": page,
+        "page_size": effective_page_size,
+        "total_rows": total_rows,
+        "total_pages": total_pages,
+        "has_next_page": page < total_pages,
+        "has_prev_page": page > 1,
+        "refresh_mode": True,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 async def run_refresh_agent(

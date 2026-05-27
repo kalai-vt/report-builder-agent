@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -44,11 +44,14 @@ open-ended "how can I help" — suggest something specific based on user role.
 Use the schema-derived examples below for your suggestions.
 
 TRACK B — "off_topic":
-Message has NO connection to KRA reports, employee goals, appraisals, ratings, or performance data.
+Message has NO connection to KRA reports, employee goals, appraisals, ratings, performance data,
+or the organisational/HR master data that supports the KRA system.
 Triggers: general knowledge (weather, sports, news, geography, history), coding or tech questions
          unrelated to KRA, personal questions, opinions, math, trivia, unrelated requests.
 DO NOT classify as off_topic if the message mentions: goals, KRA, ratings, performance, appraisal,
-employees, reports, completion, objectives, productivity, or any business metric — those are C or D.
+employees, reports, completion, objectives, productivity, any business metric, streams, designations,
+departments, grades, roles, locations, employee attributes, organisational structure, master data,
+or any field that exists in the KRA/HR database — those are C or D.
 
 Response rule: polite decline in 1 sentence + suggest ONE KRA report action from the examples below.
 Max 2 sentences total. NEVER explain why you cannot answer. NEVER answer the question. Just redirect.
@@ -75,6 +78,15 @@ Message has enough info to generate SQL without guessing, OR clarification_round
 A message is CLEAR when: subject known + metric known/inferable + time period known or not required.
 Write enriched_prompt as ONE precise sentence using KRA schema terminology.
 Include all extracted values (quarter, year, status, employee names, role-appropriate scope).
+
+MASTER DATA LOOKUPS are ALWAYS track="clear" — they need no clarification:
+These include any query asking to list or show: designations, streams, departments, grades, roles,
+locations, employee types, or any other HR/organisational reference data stored in the database.
+Examples that must be "clear":
+  - "What designations are available?"        → enriched_prompt: "List all available designations"
+  - "Show me all employee streams"            → enriched_prompt: "List all employee streams"
+  - "What departments exist in the system?"   → enriched_prompt: "List all departments"
+  - "What are the employee streams and designations available?" → enriched_prompt: "List all available employee streams and designations"
 
 === SCHEMA-DERIVED EXAMPLES FOR THIS USER (use these in greeting_message and polite_block_message) ===
 
@@ -116,6 +128,10 @@ CRITICAL RULES:
 7. NEVER ask about employee_scope when role=employee.
 8. NEVER repeat the prior_followup question — choose the next priority missing field instead.
 9. NEVER invent employee names, dates, or status values — all options come from the live DB lists above.
+10. MASTER DATA QUERIES are ALWAYS track="clear". Any message that asks to list, show, or retrieve
+    organisational reference data — including designations, streams, departments, grades, roles,
+    locations, employee types — MUST be classified as track="clear". These queries NEVER need
+    clarification and MUST NEVER be classified as off_topic. This overrides all other rules.
 """
 
 
@@ -136,6 +152,44 @@ class IntentDetectorAgent:
             )
         return self._llm
 
+    # Keywords that unambiguously identify master-data lookup queries.
+    # Any message that mentions one of these AND uses a list/show/what verb
+    # is forced to track="clear" without calling the LLM.
+    _MASTER_DATA_KEYWORDS: List[str] = [
+        "designation", "designations",
+        "stream", "streams",
+        "department", "departments",
+        "grade", "grades",
+        "role", "roles",
+        "location", "locations",
+        "employee type", "employee types",
+    ]
+    _MASTER_DATA_VERBS = re.compile(
+        r"\b(list|show|get|fetch|display|what|which|available|exist|are there)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_master_data_query(self, message: str) -> bool:
+        lower = message.lower()
+        has_keyword = any(kw in lower for kw in self._MASTER_DATA_KEYWORDS)
+        has_verb = bool(self._MASTER_DATA_VERBS.search(message))
+        return has_keyword and has_verb
+
+    def _master_data_response(self, message: str) -> Dict[str, Any]:
+        return {
+            "track": "clear",
+            "confidence": 1.0,
+            "greeting_message": "",
+            "off_topic_reason": None,
+            "polite_block_message": None,
+            "missing_field": None,
+            "follow_up_question": None,
+            "follow_up_options": [],
+            "enriched_prompt": message,
+            "extracted_filters": {},
+            "reasoning": "Master data lookup — forced to clear without LLM classification",
+        }
+
     def classify(
         self,
         user_message: str,
@@ -146,6 +200,11 @@ class IntentDetectorAgent:
     ) -> Dict[str, Any]:
         if not user_message.strip():
             return self._empty_message_response(user_role)
+
+        # Bypass LLM for master-data lookup queries — they are always "clear".
+        if self._is_master_data_query(user_message):
+            logger.info(f"[intent_agent] master-data shortcut for: {user_message[:80]}")
+            return self._master_data_response(user_message)
 
         safe_schema = (schema_summary[:2000] if schema_summary else "KRA goals, ratings, appraisals, employee data")
         safe_schema = safe_schema.replace("{", "{{").replace("}", "}}")

@@ -8,6 +8,7 @@ const http = axios.create({
 
 export const generateReport = (payload) => http.post('/report/generate', payload)
 export const clarifyReport = (payload) => http.post('/report/clarify', payload)
+export const replayReport = (payload) => http.post('/report/replay', payload)
 
 export const refreshReport = (sessionId, userId, userRole = 'employee', page = 1, pageSize = 0) =>
   http.get(`/report/refresh/${sessionId}`, {

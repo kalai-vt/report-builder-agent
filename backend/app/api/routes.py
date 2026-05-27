@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.graph.nodes import query_cache
-from app.graph.workflow import run_intent_report, run_refresh_agent
+from app.graph.workflow import run_intent_report, run_refresh_agent, run_replay_agent
 from app.services.report_service import report_service
 from app.services.session_store import session_store
 
@@ -111,6 +111,14 @@ class GenerateRequest(BaseModel):
                 "has_data": False,
             }
         }
+
+
+class ReplayRequest(BaseModel):
+    sql_query: str = Field(..., description="The saved SQL query to re-execute against live data")
+    user_id: str = Field("demo_user", description="User identifier")
+    user_role: str = Field("employee", description="Role of the requesting user")
+    page: int = Field(1, ge=1)
+    page_size: int = Field(0, ge=0, description="Rows per page (0 = server default)")
 
 
 class ClarifyRequest(BaseModel):
@@ -389,6 +397,78 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
 
     except Exception as exc:
         logger.exception(f"[generate] error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post(
+    "/report/replay",
+    response_model=ReportResponse,
+    summary="Re-execute a saved report query for live data",
+    description=(
+        "Accepts a saved SQL query and re-executes it against the live MySQL database. "
+        "No LLM or prompt building — the query is re-validated for safety then executed directly. "
+        "Use this when loading a saved report to guarantee fresh data instead of cached/stale results."
+    ),
+)
+async def replay_report(request: ReplayRequest) -> ReportResponse:
+    try:
+        if not request.sql_query.strip():
+            raise HTTPException(status_code=400, detail="sql_query must not be empty")
+
+        result = await run_replay_agent(
+            sql_query=request.sql_query,
+            user_id=request.user_id,
+            user_role=request.user_role,
+            page=request.page,
+            page_size=request.page_size,
+        )
+
+        session_id = session_store.create({
+            "original_prompt": f"[replay] {request.sql_query[:120]}",
+            "user_id": request.user_id,
+            "user_role": request.user_role,
+            "clarification_round": 0,
+            "prior_followup": "",
+        })
+
+        status = result.get("status", "success")
+        if status == "error":
+            return ReportResponse(
+                status="error",
+                error=result.get("error"),
+                session_id=session_id,
+            )
+
+        logger.info(
+            f"[replay] user={request.user_id} rows={result.get('row_count', 0)} "
+            f"session={session_id}"
+        )
+        return ReportResponse(
+            status="success",
+            sql_query=result.get("sql_query"),
+            explanation=result.get("explanation", ""),
+            dimensions=result.get("dimensions", []),
+            recommended_column_filters=result.get("recommended_column_filters", []),
+            filterable_columns=result.get("filterable_columns", []),
+            filter_instruction="client_side_only",
+            llm_call_on_filter=False,
+            data=result.get("data", []),
+            row_count=result.get("row_count", 0),
+            execution_time=result.get("execution_time", 0.0),
+            page=result.get("page", 1),
+            page_size=result.get("page_size", settings.PAGE_SIZE),
+            total_rows=result.get("total_rows", 0),
+            total_pages=result.get("total_pages", 1),
+            has_next_page=result.get("has_next_page", False),
+            has_prev_page=result.get("has_prev_page", False),
+            refresh_mode=True,
+            refreshed_at=result.get("refreshed_at"),
+            session_id=session_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[replay] error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
