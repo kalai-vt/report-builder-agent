@@ -10,7 +10,7 @@ const EXAMPLE_QUERIES = [
 
 export default function QueryInput() {
   const [query, setQuery] = useState('')
-  const { generateReport, isLoading, hasData, clearFilters, reset } = useStore()
+  const { generateReport, isLoading, hasData, clearFilters, reset, clarification } = useStore()
   const textareaRef = useRef(null)
 
   const handleSubmit = async (e) => {
@@ -103,6 +103,12 @@ export default function QueryInput() {
           )}
         </div>
       </form>
+
+      {clarification && !isLoading && (
+        <p className="mt-1.5 text-xs text-amber-500 text-center">
+          ↑ Please answer the clarification question above, or type a completely new query here to start over.
+        </p>
+      )}
 
       <p className="mt-1.5 text-xs text-gray-400 text-right">
         KRA data · GPT-4o-mini · MySQL

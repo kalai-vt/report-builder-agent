@@ -49,6 +49,7 @@ export default function ClarificationPanel() {
           {follow_up_options.map((opt, i) => (
             <button
               key={i}
+              type="button"
               onClick={() => handleOption(opt)}
               disabled={isLoading}
               className="px-3 py-1.5 text-sm bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-100 hover:border-blue-400 disabled:opacity-50 transition-colors"

@@ -24,6 +24,14 @@ _UNSAFE_PATTERNS = [
     ]
 ]
 
+# Detects comparisons of *_id / *_status_id columns to non-numeric string literals.
+# e.g. status_id = 'pending'  or  status_id = 'completed'
+# These silently evaluate to status_id = 0 in MySQL and always return 0 rows.
+_ID_STRING_COMPARE_RE = re.compile(
+    r"\b\w*(?:_id|_status)\b\s*(?:=|!=|<>|IN\s*\()\s*'[^0-9'][^']*'",
+    re.IGNORECASE,
+)
+
 _SELECT_RE      = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
 _JOIN_RE        = re.compile(r"\bJOIN\b", re.IGNORECASE)
 _ON_RE          = re.compile(r"\bON\b", re.IGNORECASE)
@@ -68,6 +76,20 @@ class SQLValidator:
             return (
                 ValidationStatus.INVALID,
                 "Cartesian joins detected — all JOINs must have explicit ON conditions",
+                sql,
+            )
+
+        m = _ID_STRING_COMPARE_RE.search(sql)
+        if m:
+            logger.warning(f"FK-string comparison detected [{m.group(0)}] user={user_id}")
+            return (
+                ValidationStatus.INVALID,
+                (
+                    f"Integer FK column compared to a string literal: '{m.group(0)}'. "
+                    "MySQL converts the string to 0, so this always returns 0 rows. "
+                    "JOIN the lookup table and compare on its name column instead "
+                    "(e.g. JOIN status s ON ugm.status_id = s.id WHERE s.status_name = 'Completed')."
+                ),
                 sql,
             )
 

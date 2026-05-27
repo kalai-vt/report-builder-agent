@@ -2,11 +2,11 @@ import { useState } from 'react'
 import useStore from '../store/useStore'
 
 export default function SqlPanel() {
-  const { sqlQuery, status } = useStore()
+  const { sqlQuery } = useStore()
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
 
-  if (status !== 'success' || !sqlQuery) return null
+  if (!sqlQuery) return null
 
   const copy = () => {
     navigator.clipboard.writeText(sqlQuery)
