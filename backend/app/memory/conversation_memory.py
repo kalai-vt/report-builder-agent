@@ -95,6 +95,8 @@ class ConversationMemoryManager:
         lines = ["=== Conversation History ==="]
         for msg in history:
             lines.append(f"{msg['role'].capitalize()}: {msg['content']}")
+            if msg["role"] == "assistant" and msg.get("sql_query"):
+                lines.append(f"[SQL used: {msg['sql_query']}]")
         lines.append("=== End History ===")
         return "\n".join(lines)
 

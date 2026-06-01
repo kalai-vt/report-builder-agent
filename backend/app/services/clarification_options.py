@@ -44,8 +44,8 @@ class ClarificationOptionsBuilder:
     def get_all_options(self) -> Dict[str, List[str]]:
         """Return options for every missing_field — used to build the prompt section."""
         fields = [
-            "time_period", "employee_scope", "status_filter",
-            "metric", "schema_scope", "designation",
+            "time_period", "employee_scope", "manager_scope",
+            "status_filter", "metric", "schema_scope", "designation",
         ]
         return {f: self.get_options(f) for f in fields}
 
@@ -75,18 +75,73 @@ class ClarificationOptionsBuilder:
                 return options
 
             if missing_field == "employee_scope":
-                rows = conn.execute(text(
-                    "SELECT CONCAT(TRIM(firstname), ' ', TRIM(lastname)) AS name "
-                    "FROM user_table "
-                    "WHERE is_active = 1 AND is_delete = 0 "
-                    "  AND firstname IS NOT NULL AND lastname IS NOT NULL "
-                    "ORDER BY firstname "
-                    "LIMIT 15"
-                ))
-                options = [r[0].strip() for r in rows if r[0] and r[0].strip()]
+                try:
+                    rows = conn.execute(text(
+                        "SELECT CONCAT(TRIM(firstname), ' ', TRIM(lastname),"
+                        "       ' (', employee_id, ')') AS name "
+                        "FROM user_table "
+                        "WHERE is_active = 1 AND is_delete = 0 "
+                        "  AND firstname IS NOT NULL AND lastname IS NOT NULL "
+                        "  AND employee_id IS NOT NULL "
+                        "ORDER BY firstname "
+                        "LIMIT 15"
+                    ))
+                    options = [r[0].strip() for r in rows if r[0] and r[0].strip()]
+                except Exception:
+                    options = []
+                if not options:
+                    # Fallback: name only (employee_id column absent or empty)
+                    rows = conn.execute(text(
+                        "SELECT CONCAT(TRIM(firstname), ' ', TRIM(lastname)) AS name "
+                        "FROM user_table "
+                        "WHERE is_active = 1 AND is_delete = 0 "
+                        "  AND firstname IS NOT NULL AND lastname IS NOT NULL "
+                        "ORDER BY firstname "
+                        "LIMIT 15"
+                    ))
+                    options = [r[0].strip() for r in rows if r[0] and r[0].strip()]
                 if not options:
                     options = self._fallback("employee_scope")
                 return options
+
+            if missing_field == "manager_scope":
+                # Fetch active users who have a management-level designation
+                try:
+                    rows = conn.execute(text(
+                        "SELECT DISTINCT "
+                        "  CONCAT(TRIM(u.firstname), ' ', TRIM(u.lastname), ' (', u.employee_id, ')') AS name "
+                        "FROM user_table u "
+                        "JOIN designation d ON u.designation_id = d.id "
+                        "WHERE u.is_active = 1 AND u.is_delete = 0 "
+                        "  AND u.firstname IS NOT NULL AND u.lastname IS NOT NULL "
+                        "  AND u.employee_id IS NOT NULL "
+                        "  AND d.designation_level >= 3 "   # level 3+ = lead/manager/above
+                        "ORDER BY u.firstname "
+                        "LIMIT 15"
+                    ))
+                    options = [r[0].strip() for r in rows if r[0] and r[0].strip()]
+                except Exception:
+                    options = []
+
+                if not options:
+                    # Fallback: any user who appears as a reporting manager
+                    try:
+                        rows = conn.execute(text(
+                            "SELECT DISTINCT "
+                            "  CONCAT(TRIM(u.firstname), ' ', TRIM(u.lastname)) AS name "
+                            "FROM user_table u "
+                            "WHERE u.is_active = 1 AND u.is_delete = 0 "
+                            "  AND u.firstname IS NOT NULL "
+                            "ORDER BY u.firstname LIMIT 15"
+                        ))
+                        options = [r[0].strip() for r in rows if r[0] and r[0].strip()]
+                    except Exception:
+                        options = []
+
+                # Always prepend the "all managers" choice
+                fixed = ["All managers", "Specific manager"]
+                named = [o for o in options if o not in fixed]
+                return fixed + named[:10] if named else self._fallback("manager_scope")
 
             if missing_field == "status_filter":
                 rows = conn.execute(text(
@@ -132,6 +187,7 @@ class ClarificationOptionsBuilder:
         return {
             "time_period":    ["Q1 2025", "Q2 2025", "Q3 2025", "Q4 2025", "Full year 2025"],
             "employee_scope": ["All team members", "Specific employee"],
+            "manager_scope":  ["All managers", "Specific manager"],
             "status_filter":  ["In Progress", "Completed", "Hold", "Achieved", "All"],
             "metric":         ["Goal completion status", "Goal count", "Progress percentage", "Rating summary"],
             "schema_scope":   ["KRA Goals", "Goal Assignments", "R&R Nominations", "Certifications"],

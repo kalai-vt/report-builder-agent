@@ -26,6 +26,9 @@ USER CONTEXT:
 - Clarification Round: {clarification_round}  (if >= 2 you MUST return track="clear")
 - Prior Follow-up Asked: {prior_followup}
 
+CONVERSATION HISTORY (most recent exchanges):
+{memory_context}
+
 KRA SCHEMA SUMMARY (for assessing query completeness):
 {schema_summary}
 
@@ -53,31 +56,77 @@ employees, reports, completion, objectives, productivity, any business metric, s
 departments, grades, roles, locations, employee attributes, organisational structure, master data,
 or any field that exists in the KRA/HR database — those are C or D.
 
+FOLLOW-UP OVERRIDE (highest priority): If the Conversation History above contains a previous
+KRA report query and the current message is a short modification/refinement such as "add X",
+"include X", "also show X", "remove X", "filter by X", "sort by X", "group by X", "with X",
+"show only X", "exclude X", "now add X", or similar — it is ALWAYS track="clear" (a follow-up
+refinement of the prior report). NEVER classify such messages as off_topic.
+
 Response rule: polite decline in 1 sentence + suggest ONE KRA report action from the examples below.
 Max 2 sentences total. NEVER explain why you cannot answer. NEVER answer the question. Just redirect.
 Template: "I'm only able to help with KRA report building! [Suggest one of the examples below]."
 
 TRACK C — "incomplete":
-Message IS about KRA/performance/goals BUT is missing critical information needed for SQL generation.
-Missing-info categories (ask about the HIGHEST priority one first):
-  1. metric       — what to measure: goals? ratings? completion %? count? summary?
-  2. time_period  — no quarter, year, or date range (e.g. "show my goals" has no period)
-  3. employee_scope — manager/lead with no clarity on WHOSE data (NEVER ask for role=employee)
-  4. status_filter — "show goals" without all/completed/in-progress/not-started
-  5. schema_scope — unclear which module
-  6. comparison_base — "compare" with only one side specified
+Message IS about KRA/performance/goals BUT is missing one critical piece of information that
+CANNOT be inferred or defaulted, making SQL generation impossible or genuinely ambiguous.
+Ask the ONE most blocking question only. Provide 3–5 concrete options.
 
-Refinements always go to Track D: "filter by", "group by", "sort by", "now show", "also show".
+――― TIME PERIOD RULE (most commonly misapplied) ―――
+ONLY ask for time_period when the query explicitly contains time-sensitive words:
+  (quarter, Q1/Q2/Q3/Q4, month, year, annual, this period, last period, recent, trend,
+   assigned date, due date, target date, this quarter/month/year, previous quarter/month/year)
+DO NOT ask for time_period for simple listing / summary queries — these are track="clear":
+  ✗ "Show all goals"                   → track="clear" (return all goals, no date filter)
+  ✗ "Show goals assigned by manager"   → track="clear" (group by manager, all goals)
+  ✗ "List employees and their KRAs"    → track="clear"
+  ✗ "Show KRA progress"               → track="clear"
+  ✗ "Employee productivity report"     → track="clear"
+  ✗ "List KRAs by manager"            → track="clear"
+
+――― MANAGER SCOPE ―――
+Ask when the query references "a specific manager" / "particular manager" without naming one,
+AND the user role is not employee.
+"Show goals assigned by manager" (without "specific") → track="clear", group ALL managers.
+"Show goals for a specific manager" → ask which manager (missing_field="manager_scope").
+Question: "Do you want to view goals for all managers or a specific manager?"
+
+――― EMPLOYEE SCOPE ―――
+Ask ONLY when a manager/lead/hr user asks about someone else's data with no clarity on who.
+NEVER ask for role=employee.
+
+――― STATUS FILTER ―――
+Ask ONLY when status is essential AND the query contains no implied status.
+"Show active goals" → status inferred (active), no need to ask.
+
+――― METRIC ―――
+Ask ONLY when the query is so vague that the metric is completely unclear.
+
+Priority order — ask the ONE that is most blocking for SQL generation:
+  1. manager_scope  — query says "specific manager" but no name given
+  2. employee_scope — non-employee role asks about someone's data, scope unclear
+  3. status_filter  — status essential and not implied
+  4. time_period    — ONLY if query explicitly mentions time/date keywords
+  5. metric         — completely ambiguous subject
+  6. schema_scope   — module genuinely unclear
+
 If clarification_round >= 2 → MUST return track="clear" regardless.
-If prior_followup was about time_period, ask about the next priority missing field.
+NEVER repeat the prior_followup question — move to the next priority field.
 NEVER ask about employee_scope when role=employee.
-Ask EXACTLY ONE question. Provide 3-5 concrete answer options.
 
 TRACK D — "clear":
 Message has enough info to generate SQL without guessing, OR clarification_round >= 2 (force).
-A message is CLEAR when: subject known + metric known/inferable + time period known or not required.
+A message is CLEAR when: subject known + metric known/inferable + scope clear or not required.
+Time period is NOT required for listing/summary queries — omit the date filter and return all.
 Write enriched_prompt as ONE precise sentence using KRA schema terminology.
 Include all extracted values (quarter, year, status, employee names, role-appropriate scope).
+
+ALWAYS track="clear" — NEVER ask clarification for these patterns:
+  - "Show all goals [by X]"              → List all goals grouped/filtered by X
+  - "Show goals assigned by manager"     → List all assigned goals with manager name, grouped by manager
+  - "Employee productivity report"       → Productivity metrics for all employees
+  - "List employees [and their Y]"       → All employees with Y
+  - "Show KRA progress [for all/team]"  → KRA progress for all in scope
+  - "List/show X by Y"                  → Aggregate X by Y, no date filter needed
 
 MASTER DATA LOOKUPS are ALWAYS track="clear" — they need no clarification:
 These include any query asking to list or show: designations, streams, departments, grades, roles,
@@ -98,6 +147,7 @@ matching the missing_field. Do NOT use any names, dates, or values not listed he
 
 time_period options     : {time_period_options}
 employee_scope options  : {employee_scope_options}
+manager_scope options   : {manager_scope_options}
 status_filter options   : {status_filter_options}
 metric options          : {metric_options}
 schema_scope options    : {schema_scope_options}
@@ -110,7 +160,7 @@ designation options     : {designation_options}
   "greeting_message": "string or null",
   "off_topic_reason": "general_knowledge|unrelated|personal|null",
   "polite_block_message": "string or null",
-  "missing_field": "time_period|employee_scope|metric|status_filter|schema_scope|comparison_base|null",
+  "missing_field": "time_period|employee_scope|manager_scope|metric|status_filter|schema_scope|comparison_base|null",
   "follow_up_question": "string or null",
   "follow_up_options": [],
   "enriched_prompt": "string or null",
@@ -132,6 +182,11 @@ CRITICAL RULES:
     organisational reference data — including designations, streams, departments, grades, roles,
     locations, employee types — MUST be classified as track="clear". These queries NEVER need
     clarification and MUST NEVER be classified as off_topic. This overrides all other rules.
+11. FOLLOW-UP REFINEMENTS are ALWAYS track="clear". If Conversation History is non-empty AND
+    the current message starts with or contains modification verbs (add, include, also show,
+    remove, filter, sort, group, with, exclude, now show, and also, update, change), it is a
+    refinement of the previous report. Return track="clear" with an enriched_prompt that merges
+    the intent of the previous query with the new modification. This rule overrides Track B.
 """
 
 
@@ -152,7 +207,43 @@ class IntentDetectorAgent:
             )
         return self._llm
 
-    # Keywords that unambiguously identify master-data lookup queries.
+    # ── Continuation / follow-up detection ───────────────────────────────────
+    # When the user has a previous report in memory and the message starts with
+    # one of these verbs, it is a refinement — bypass LLM classification entirely.
+    _CONTINUATION_RE = re.compile(
+        r"^\s*("
+        r"add|include|also\s+show|also\s+include|also\s+add|also\s+display|"
+        r"remove|exclude|don'?t\s+show|hide|"
+        r"filter\s+(by|for|on|to)|filter\s+(?!redirect)"
+        r"|sort\s+by|order\s+by|group\s+by|"
+        r"only\s+show|show\s+only|just\s+show|"
+        r"with\s+\w|and\s+also|now\s+(show|add|include|filter|sort|group)|"
+        r"update\s+(the\s+)?(report|query|result)|change\s+(the\s+)?(report|query)|"
+        r"narrow\s+(down|to|by)|limit\s+to|break\s+down\s+by|"
+        r"summarize\s+by|count\s+by|what\s+about\s+adding"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def _is_continuation(self, message: str) -> bool:
+        return bool(self._CONTINUATION_RE.match(message))
+
+    def _continuation_response(self, user_message: str) -> Dict[str, Any]:
+        return {
+            "track": "clear",
+            "confidence": 0.98,
+            "greeting_message": "",
+            "off_topic_reason": None,
+            "polite_block_message": None,
+            "missing_field": None,
+            "follow_up_question": None,
+            "follow_up_options": [],
+            "enriched_prompt": user_message,
+            "extracted_filters": {},
+            "reasoning": "Continuation/refinement of previous report — bypassed LLM classification",
+        }
+
+    # ── Master-data lookup detection ──────────────────────────────────────────
     # Any message that mentions one of these AND uses a list/show/what verb
     # is forced to track="clear" without calling the LLM.
     _MASTER_DATA_KEYWORDS: List[str] = [
@@ -197,6 +288,7 @@ class IntentDetectorAgent:
         clarification_round: int = 0,
         prior_followup: str = "",
         schema_summary: str = "",
+        memory_context: str = "",
     ) -> Dict[str, Any]:
         if not user_message.strip():
             return self._empty_message_response(user_role)
@@ -206,8 +298,17 @@ class IntentDetectorAgent:
             logger.info(f"[intent_agent] master-data shortcut for: {user_message[:80]}")
             return self._master_data_response(user_message)
 
+        # Bypass LLM for follow-up/continuation messages when conversation history exists.
+        # "Add email", "Filter by dept", "Also show salary" etc. are always refinements.
+        if memory_context and self._is_continuation(user_message):
+            logger.info(f"[intent_agent] continuation shortcut for: {user_message[:80]}")
+            return self._continuation_response(user_message)
+
         safe_schema = (schema_summary[:2000] if schema_summary else "KRA goals, ratings, appraisals, employee data")
         safe_schema = safe_schema.replace("{", "{{").replace("}", "}}")
+
+        safe_memory = (memory_context[:1500] if memory_context else "No prior conversation.")
+        safe_memory = safe_memory.replace("{", "{{").replace("}", "}}")
 
         # Build schema-driven examples for greeting/off-topic messages
         suggestions = suggestion_builder.get_suggestions(user_role)
@@ -223,10 +324,12 @@ class IntentDetectorAgent:
             user_role=user_role,
             clarification_round=clarification_round,
             prior_followup=prior_followup or "None",
+            memory_context=safe_memory,
             schema_summary=safe_schema,
             role_examples=role_examples,
             time_period_options=_fmt(db_options.get("time_period", [])),
             employee_scope_options=_fmt(db_options.get("employee_scope", [])),
+            manager_scope_options=_fmt(db_options.get("manager_scope", [])),
             status_filter_options=_fmt(db_options.get("status_filter", [])),
             metric_options=_fmt(db_options.get("metric", [])),
             schema_scope_options=_fmt(db_options.get("schema_scope", [])),
