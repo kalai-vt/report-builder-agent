@@ -309,6 +309,52 @@ def execution_engine_node(state: AgentState) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
+# Employee display post-processor
+# ─────────────────────────────────────────────
+
+_FIRST_NAME_COLS = {"firstname", "first_name", "fname"}
+_LAST_NAME_COLS  = {"lastname",  "last_name",  "lname"}
+_EMP_ID_COLS     = {"employee_id", "emp_id", "employeeid", "emp_code"}
+
+
+def _apply_employee_format(rows: list, columns: list):
+    """Merge raw first/last name + employee_id columns into a single 'employee'
+    column formatted as 'First Last (EMP001)'.  No-ops when the columns are
+    absent (i.e. the LLM already applied CONCAT in the SQL)."""
+    first_col = next((c for c in columns if c.lower() in _FIRST_NAME_COLS), None)
+    last_col  = next((c for c in columns if c.lower() in _LAST_NAME_COLS),  None)
+
+    if not (first_col and last_col):
+        return rows, columns
+
+    id_col = next((c for c in columns if c.lower() in _EMP_ID_COLS), None)
+    drop   = {c for c in [first_col, last_col, id_col] if c}
+
+    new_columns: list = []
+    inserted = False
+    for col in columns:
+        if col == first_col and not inserted:
+            new_columns.append("employee")
+            inserted = True
+        if col not in drop:
+            new_columns.append(col)
+    if not inserted:
+        new_columns.insert(0, "employee")
+
+    def _build(row: dict) -> dict:
+        first = str(row.get(first_col) or "").strip()
+        last  = str(row.get(last_col)  or "").strip()
+        name  = f"{first} {last}".strip()
+        if id_col and row.get(id_col):
+            name = f"{name} ({row[id_col]})"
+        new_row = {k: v for k, v in row.items() if k not in drop}
+        new_row["employee"] = name
+        return new_row
+
+    return [_build(r) for r in rows], new_columns
+
+
+# ─────────────────────────────────────────────
 # Node 8 — Result Formatter
 # ─────────────────────────────────────────────
 
@@ -326,6 +372,8 @@ def result_formatter_node(state: AgentState) -> Dict[str, Any]:
 
     rows: list    = exec_result.get("rows", [])
     columns: list = exec_result.get("columns", [])
+
+    rows, columns = _apply_employee_format(rows, columns)
 
     # Columns without aggregate keywords → dimensions
     dimensions = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
@@ -474,6 +522,7 @@ def intent_detector_node(state: AgentState) -> Dict[str, Any]:
         clarification_round=clarification_round,
         prior_followup=prior_followup,
         schema_summary=schema_str,
+        memory_context=state.get("memory_context", ""),
     )
 
     duration = round((time.time() - t0) * 1000, 1)
@@ -834,6 +883,8 @@ def response_node(state: AgentState) -> Dict[str, Any]:
     llm_resp = state.get("llm_response", {})
     rows: list = exec_result.get("rows", [])
     columns: list = exec_result.get("columns", [])
+
+    rows, columns = _apply_employee_format(rows, columns)
 
     dimensions      = [col for col in columns if not any(kw in col.lower() for kw in _METRIC_KW)]
     filterable_cols = filter_recommender.filterable_columns(rows=rows, columns=columns)

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import useStore from '../store/useStore'
 
@@ -15,11 +16,15 @@ function timeAgo(iso) {
 export default function SavedReportsSidebar({ open, onClose }) {
   const navigate = useNavigate()
   const { savedReports, loadSavedReport, deleteSavedReport } = useStore()
+  const [loadingId, setLoadingId] = useState(null)
 
-  const handleLoad = async (saved) => {
+  const handleLoad = async (report) => {
+    if (loadingId) return
+    setLoadingId(report.id)
     onClose()
     navigate('/')
-    await loadSavedReport(saved)
+    await loadSavedReport(report)
+    setLoadingId(null)
   }
 
   return (
@@ -73,34 +78,64 @@ export default function SavedReportsSidebar({ open, onClose }) {
             </div>
           ) : (
             <ul className="py-2 divide-y divide-gray-50">
-              {savedReports.map((report) => (
-                <li key={report.id} className="group px-4 py-3 hover:bg-gray-50 transition-colors">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-800 truncate" title={report.name}>
-                        {report.name}
-                      </p>
-                      <p className="text-xs text-gray-400 truncate mt-0.5" title={report.prompt}>
-                        {report.prompt}
-                      </p>
-                      <p className="text-xs text-gray-300 mt-1">{timeAgo(report.savedAt)}</p>
-                    </div>
-                    <button
-                      onClick={() => deleteSavedReport(report.id)}
-                      className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-400 transition-all text-base leading-none flex-shrink-0 mt-0.5"
-                      title="Delete"
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => handleLoad(report)}
-                    className="mt-2 w-full text-xs px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-left"
+              {savedReports.map((report) => {
+                const isThis  = loadingId === report.id
+                const isOther = loadingId !== null && loadingId !== report.id
+
+                return (
+                  <li
+                    key={report.id}
+                    className={`group px-4 py-3 transition-colors ${
+                      isOther ? 'opacity-40 pointer-events-none' : 'hover:bg-gray-50'
+                    }`}
                   >
-                    Load Report →
-                  </button>
-                </li>
-              ))}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate" title={report.name}>
+                          {report.name}
+                        </p>
+                        <p className="text-xs text-gray-400 truncate mt-0.5" title={report.prompt}>
+                          {report.prompt}
+                        </p>
+                        <p className="text-xs text-gray-300 mt-1">{timeAgo(report.savedAt)}</p>
+                      </div>
+                      {!isThis && (
+                        <button
+                          onClick={() => deleteSavedReport(report.id)}
+                          className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-400 transition-all text-base leading-none flex-shrink-0 mt-0.5"
+                          title="Delete"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => handleLoad(report)}
+                      disabled={!!loadingId}
+                      className={`mt-2 w-full text-xs px-3 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
+                        isThis
+                          ? 'bg-blue-100 text-blue-600 cursor-wait'
+                          : 'bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50'
+                      }`}
+                    >
+                      {isThis ? (
+                        <>
+                          <span className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                          Fetching live data…
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                          Load Live Report →
+                        </>
+                      )}
+                    </button>
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>

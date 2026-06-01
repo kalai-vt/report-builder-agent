@@ -18,8 +18,8 @@ function LoadingOverlay() {
         <div className="absolute inset-0 w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
       </div>
       <div className="text-center">
-        <p className="text-sm font-medium text-gray-600">Generating report…</p>
-        <p className="text-xs text-gray-400 mt-1">AI is building and executing your SQL query</p>
+        <p className="text-sm font-medium text-gray-600">Building report…</p>
+        <p className="text-xs text-gray-400 mt-1">Executing SQL against the database</p>
       </div>
     </div>
   )
