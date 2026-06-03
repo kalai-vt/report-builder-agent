@@ -130,12 +130,22 @@ def load_context_node(state: AgentState) -> Dict[str, Any]:
 
 def prompt_builder_node(state: AgentState) -> Dict[str, Any]:
     t0 = time.time()
-    # Use the intent-enriched prompt when available (Track C path)
     effective_query = state.get("enriched_prompt") or state["user_query"]
+
+    # Use the rich, description-aware relevant schema from the JSON registry.
+    # Falls back to the full live-DB schema string when the registry is not loaded.
+    from app.db.schema_registry import schema_registry
+    if schema_registry.is_loaded():
+        schema_str = schema_registry.get_relevant_schema_string(effective_query)
+        retrieved_tables = schema_registry.get_relevant_tables(effective_query)
+    else:
+        schema_str = state.get("schema", "")
+        retrieved_tables = []
+
     built_prompt = prompt_builder.build_prompt(
         user_query=effective_query,
         user_id=state["user_id"],
-        schema_string=state.get("schema", ""),
+        schema_string=schema_str,
         memory_context=state.get("memory_context", ""),
         retry_feedback=state.get("retry_feedback", ""),
     )
@@ -143,10 +153,14 @@ def prompt_builder_node(state: AgentState) -> Dict[str, Any]:
         "node": "prompt_builder",
         "status": "success",
         "prompt_chars": len(built_prompt),
+        "retrieved_tables": retrieved_tables,
         "is_retry": bool(state.get("retry_feedback")),
         "duration_ms": round((time.time() - t0) * 1000, 1),
     }
-    logger.info(f"[prompt_builder] user={state['user_id']} chars={step['prompt_chars']} retry={step['is_retry']}")
+    logger.info(
+        "[prompt_builder] user=%s tables=%s chars=%d retry=%s",
+        state["user_id"], retrieved_tables, len(built_prompt), step["is_retry"],
+    )
     return {"prompt": built_prompt, "steps": _steps(state) + [step]}
 
 

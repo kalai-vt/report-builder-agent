@@ -1,0 +1,2843 @@
+{
+  "schema_name": "kra_db",
+  "source": "INFORMATION_SCHEMA.COLUMNS export",
+  "purpose": "Schema-grounded context for AI Report Builder text-to-SQL generation.",
+  "generation_notes": [
+    "This file is generated from uploaded table/column/data-type metadata.",
+    "Descriptions are inferred from table and column names for LLM understanding.",
+    "The schema contains metadata only; it does not contain actual row values.",
+    "The AI agent must not invent tables, columns, metrics, joins, or data values."
+  ],
+  "global_rules": {
+    "allowed_sql": "SELECT queries only",
+    "blocked_sql": [
+      "INSERT",
+      "UPDATE",
+      "DELETE",
+      "DROP",
+      "ALTER",
+      "TRUNCATE",
+      "CREATE",
+      "REPLACE"
+    ],
+    "no_hallucination_rules": [
+      "Use only tables listed in this JSON.",
+      "Use only columns listed under each table.",
+      "Do not assume actual data values for stream, designation, status, skill, category, badge, or employee names.",
+      "If a value is unknown, ask a clarification or generate a query to list available values.",
+      "Derived metrics must be based only on available numeric/countable columns."
+    ],
+    "employee_display_format": "CONCAT(TRIM(user_table.firstname), ' ', TRIM(user_table.lastname), ' (', user_table.employee_id, ')')"
+  },
+  "business_domains": {
+    "employee_master": [
+      "user_table",
+      "designation"
+    ],
+    "goals_kra": [
+      "user_goal_mapping",
+      "master_goals",
+      "goal_history",
+      "status",
+      "remarks_table",
+      "remarks_threads",
+      "disagree_remarks_master"
+    ],
+    "feedback": [
+      "user_feedback",
+      "feedback_edit_requests",
+      "remarks_table",
+      "remark_approvals"
+    ],
+    "skills_certifications": [
+      "skills",
+      "certificates",
+      "certification_approvals",
+      "certification_completion",
+      "approval_history"
+    ],
+    "badges_recognition": [
+      "badge_master",
+      "user_badges",
+      "additional_approval",
+      "approval_history",
+      "kra_blob"
+    ],
+    "recommendations": [
+      "recommendations"
+    ],
+    "rnr": [
+      "rnr_cycles",
+      "rnr_categories",
+      "rnr_cycle_categories",
+      "rnr_nominations",
+      "rnr_approval_actions"
+    ],
+    "ai_report_builder": [
+      "ai_sessions",
+      "ai_messages",
+      "ai_reports",
+      "ai_report_versions",
+      "ai_shares",
+      "conversation_history",
+      "ai_users"
+    ],
+    "notifications": [
+      "notification_bell",
+      "notification_settings"
+    ],
+    "metadata_master": [
+      "master_categories",
+      "tags",
+      "tag_category",
+      "goal_tag_category",
+      "master_goal_tag_cat",
+      "stg_kra_excel",
+      "migration_log"
+    ]
+  },
+  "tables": [
+    {
+      "table_name": "additional_approval",
+      "description": "Stores additional approval routing for badges, including approver and badge references.",
+      "columns": [
+        {
+          "name": "additional_approval_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "badge_master_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "approver_id",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        }
+      ],
+      "recommended_filters": [
+        "additional_approval.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `additional_approval` when the user asks about stores additional approval routing for badges, including approver and badge references."
+    },
+    {
+      "table_name": "ai_messages",
+      "description": "Stores AI chatbot conversation messages and generated SQL for each AI session.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "session_id",
+          "data_type": "varchar",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "role",
+          "data_type": "varchar",
+          "description": "role field from ai_messages."
+        },
+        {
+          "name": "content",
+          "data_type": "text",
+          "description": "content field from ai_messages."
+        },
+        {
+          "name": "sql_query",
+          "data_type": "text",
+          "description": "sql_query field from ai_messages."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `ai_messages` when the user asks about stores ai chatbot conversation messages and generated sql for each ai session."
+    },
+    {
+      "table_name": "ai_report_versions",
+      "description": "Stores version history of saved AI reports including natural language query, SQL, filters, and version number.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "report_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "nl_query",
+          "data_type": "text",
+          "description": "nl_query field from ai_report_versions."
+        },
+        {
+          "name": "sql_query",
+          "data_type": "text",
+          "description": "sql_query field from ai_report_versions."
+        },
+        {
+          "name": "filters",
+          "data_type": "json",
+          "description": "filters field from ai_report_versions."
+        },
+        {
+          "name": "version",
+          "data_type": "int",
+          "description": "version field from ai_report_versions."
+        },
+        {
+          "name": "saved_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `ai_report_versions` when the user asks about stores version history of saved ai reports including natural language query, sql, filters, and version number."
+    },
+    {
+      "table_name": "ai_reports",
+      "description": "Stores saved AI report configurations such as report name, prompt, SQL, filters, metadata, and ownership.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "user_id",
+          "data_type": "int",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "session_id",
+          "data_type": "varchar",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "name",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "description",
+          "data_type": "text",
+          "description": "Description text."
+        },
+        {
+          "name": "nl_query",
+          "data_type": "text",
+          "description": "nl_query field from ai_reports."
+        },
+        {
+          "name": "sql_query",
+          "data_type": "text",
+          "description": "sql_query field from ai_reports."
+        },
+        {
+          "name": "filters",
+          "data_type": "json",
+          "description": "filters field from ai_reports."
+        },
+        {
+          "name": "result_meta",
+          "data_type": "json",
+          "description": "result_meta field from ai_reports."
+        },
+        {
+          "name": "version",
+          "data_type": "int",
+          "description": "version field from ai_reports."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "datetime",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `ai_reports` when the user asks about stores saved ai report configurations such as report name, prompt, sql, filters, metadata, and ownership."
+    },
+    {
+      "table_name": "ai_sessions",
+      "description": "Stores AI report builder chat/report sessions created by users.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "varchar",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "user_id",
+          "data_type": "int",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "title",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `ai_sessions` when the user asks about stores ai report builder chat/report sessions created by users."
+    },
+    {
+      "table_name": "ai_shares",
+      "description": "Stores shared AI report access tokens and expiry details.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "report_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "user_id",
+          "data_type": "int",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "token",
+          "data_type": "varchar",
+          "description": "token field from ai_shares."
+        },
+        {
+          "name": "expires_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `ai_shares` when the user asks about stores shared ai report access tokens and expiry details."
+    },
+    {
+      "table_name": "ai_users",
+      "description": "Stores AI report builder application users.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "email",
+          "data_type": "varchar",
+          "description": "Employee or user email address."
+        },
+        {
+          "name": "name",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "password",
+          "data_type": "varchar",
+          "description": "password field from ai_users."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `ai_users` when the user asks about stores ai report builder application users."
+    },
+    {
+      "table_name": "approval_history",
+      "description": "Stores approval history for skills, certificates, badges, and related KRA approval workflows.",
+      "columns": [
+        {
+          "name": "approval_history_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "category",
+          "data_type": "varchar",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "skill_id",
+          "data_type": "int",
+          "description": "Skill reference or skill-related detail."
+        },
+        {
+          "name": "cid",
+          "data_type": "int",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "user_badges_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "approver_id",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "approval_level",
+          "data_type": "int",
+          "description": "approval_level field from approval_history."
+        },
+        {
+          "name": "additional_approval_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "notes",
+          "data_type": "text",
+          "description": "notes field from approval_history."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "approval_history.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `approval_history` when the user asks about stores approval history for skills, certificates, badges, and related kra approval workflows."
+    },
+    {
+      "table_name": "badge_master",
+      "description": "Master table for badge definitions, descriptions, approval levels, weightage, and badge settings.",
+      "columns": [
+        {
+          "name": "badge_master_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "badge_name",
+          "data_type": "varchar",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "badge_bg_clr",
+          "data_type": "text",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "badge_image_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "badge_description",
+          "data_type": "text",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "approval_level",
+          "data_type": "int",
+          "description": "approval_level field from badge_master."
+        },
+        {
+          "name": "weightage",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "frequency_limit",
+          "data_type": "int",
+          "description": "frequency_limit field from badge_master."
+        },
+        {
+          "name": "is_additional_approval",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "is_lead_badge",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "updated_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "badge_master.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `badge_master` when the user asks about master table for badge definitions, descriptions, approval levels, weightage, and badge settings."
+    },
+    {
+      "table_name": "certificates",
+      "description": "Stores employee certification requests/details including course, platform, dates, status, and employee reference.",
+      "columns": [
+        {
+          "name": "cid",
+          "data_type": "int",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "certificate_name",
+          "data_type": "varchar",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "course",
+          "data_type": "varchar",
+          "description": "course field from certificates."
+        },
+        {
+          "name": "course_fee",
+          "data_type": "varchar",
+          "description": "course_fee field from certificates."
+        },
+        {
+          "name": "skills_to_be_added",
+          "data_type": "varchar",
+          "description": "Skill reference or skill-related detail."
+        },
+        {
+          "name": "duration",
+          "data_type": "varchar",
+          "description": "duration field from certificates."
+        },
+        {
+          "name": "platform",
+          "data_type": "varchar",
+          "description": "platform field from certificates."
+        },
+        {
+          "name": "issued_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "expected_completion_date",
+          "data_type": "varchar",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "is_blob",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "justification",
+          "data_type": "varchar",
+          "description": "justification field from certificates."
+        }
+      ],
+      "recommended_filters": [
+        "certificates.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `certificates` when the user asks about stores employee certification requests/details including course, platform, dates, status, and employee reference."
+    },
+    {
+      "table_name": "certification_approvals",
+      "description": "Stores approval actions and remarks for certification requests.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "cid",
+          "data_type": "int",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "phase",
+          "data_type": "varchar",
+          "description": "phase field from certification_approvals."
+        },
+        {
+          "name": "level",
+          "data_type": "tinyint",
+          "description": "level field from certification_approvals."
+        },
+        {
+          "name": "approver_id",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "approver_name",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "action",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "remarks",
+          "data_type": "text",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "acted_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "int",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "certification_approvals.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `certification_approvals` when the user asks about stores approval actions and remarks for certification requests."
+    },
+    {
+      "table_name": "certification_completion",
+      "description": "Stores certification completion submission details, completion date, links, files, and current status.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "certification_request_id",
+          "data_type": "int",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "actual_completion_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "certification_link",
+          "data_type": "varchar",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "certificate_file",
+          "data_type": "longtext",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "file_name",
+          "data_type": "varchar",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "file_mime_type",
+          "data_type": "varchar",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "current_status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "submitted_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `certification_completion` when the user asks about stores certification completion submission details, completion date, links, files, and current status."
+    },
+    {
+      "table_name": "conversation_history",
+      "description": "Stores general AI conversation history with user messages, assistant messages, and generated SQL.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "user_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "role",
+          "data_type": "varchar",
+          "description": "role field from conversation_history."
+        },
+        {
+          "name": "content",
+          "data_type": "text",
+          "description": "content field from conversation_history."
+        },
+        {
+          "name": "sql_query",
+          "data_type": "text",
+          "description": "sql_query field from conversation_history."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `conversation_history` when the user asks about stores general ai conversation history with user messages, assistant messages, and generated sql."
+    },
+    {
+      "table_name": "designation",
+      "description": "Master table for employee designations and designation levels.",
+      "columns": [
+        {
+          "name": "designation_id",
+          "data_type": "int",
+          "description": "Designation master identifier."
+        },
+        {
+          "name": "designation_name",
+          "data_type": "varchar",
+          "description": "Designation display name."
+        },
+        {
+          "name": "is_active",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "timestamp",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "designation_level",
+          "data_type": "varchar",
+          "description": "designation_level field from designation."
+        }
+      ],
+      "recommended_filters": [
+        "designation.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `designation` when the user asks about master table for employee designations and designation levels."
+    },
+    {
+      "table_name": "disagree_remarks_master",
+      "description": "Stores disagreement, escalation, and conflict resolution details for goal remarks/feedback.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "remark_id",
+          "data_type": "int",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "is_agree",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "disagree_comments",
+          "data_type": "text",
+          "description": "disagree_comments field from disagree_remarks_master."
+        },
+        {
+          "name": "leads_disagree_comments",
+          "data_type": "text",
+          "description": "leads_disagree_comments field from disagree_remarks_master."
+        },
+        {
+          "name": "leads_disagree_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "conflict_resolved_comment",
+          "data_type": "text",
+          "description": "conflict_resolved_comment field from disagree_remarks_master."
+        },
+        {
+          "name": "created_at",
+          "data_type": "timestamp",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "disagree_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "conflict_resolve_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "disagree_escalation_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `disagree_remarks_master` when the user asks about stores disagreement, escalation, and conflict resolution details for goal remarks/feedback."
+    },
+    {
+      "table_name": "feedback_edit_requests",
+      "description": "Stores requests to edit feedback, including request reason, status, and resolver details.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "feedback_id",
+          "data_type": "int",
+          "description": "Feedback information or feedback reference."
+        },
+        {
+          "name": "requested_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "reason",
+          "data_type": "text",
+          "description": "reason field from feedback_edit_requests."
+        },
+        {
+          "name": "rejected_reason",
+          "data_type": "varchar",
+          "description": "rejected_reason field from feedback_edit_requests."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "requested_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "resolved_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "resolved_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `feedback_edit_requests` when the user asks about stores requests to edit feedback, including request reason, status, and resolver details."
+    },
+    {
+      "table_name": "goal_history",
+      "description": "Stores historical changes to employee goals, target dates, actual dates, and modifiers.",
+      "columns": [
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "actual_Date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "target_Date",
+          "data_type": "date",
+          "description": "Target/due date for the goal or item."
+        },
+        {
+          "name": "modified_Date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "modified_By",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "command_line",
+          "data_type": "varchar",
+          "description": "command_line field from goal_history."
+        },
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "umid",
+          "data_type": "int",
+          "description": "umid field from goal_history."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `goal_history` when the user asks about stores historical changes to employee goals, target dates, actual dates, and modifiers."
+    },
+    {
+      "table_name": "goal_tag_category",
+      "description": "Maps goals to tag categories for goal classification.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "tag_cat_id",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "is_active",
+          "data_type": "bigint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [
+        "goal_tag_category.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `goal_tag_category` when the user asks about maps goals to tag categories for goal classification."
+    },
+    {
+      "table_name": "kra_blob",
+      "description": "Stores blob/file metadata related to KRA items such as certificates, badges, and attachments.",
+      "columns": [
+        {
+          "name": "blob_id",
+          "data_type": "int",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "blob_url",
+          "data_type": "text",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "blob_file_name",
+          "data_type": "varchar",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "category",
+          "data_type": "varchar",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "cid",
+          "data_type": "int",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "badge_master_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "kra_blob.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `kra_blob` when the user asks about stores blob/file metadata related to kra items such as certificates, badges, and attachments."
+    },
+    {
+      "table_name": "master_categories",
+      "description": "Master table for goal/category names used in KRA categorization.",
+      "columns": [
+        {
+          "name": "category_id",
+          "data_type": "int",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "category_name",
+          "data_type": "varchar",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "is_active",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "timestamp",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [
+        "master_categories.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `master_categories` when the user asks about master table for goal/category names used in kra categorization."
+    },
+    {
+      "table_name": "master_goal_tag_cat",
+      "description": "Maps master goals to tag categories.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "tag_cat_id",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `master_goal_tag_cat` when the user asks about maps master goals to tag categories."
+    },
+    {
+      "table_name": "master_goals",
+      "description": "Master table for goal definitions, descriptions, tags, weightage, target dates, and designation applicability.",
+      "columns": [
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "goal_desc",
+          "data_type": "varchar",
+          "description": "Goal description."
+        },
+        {
+          "name": "tag_cat_id",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "created_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "modified_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "tags",
+          "data_type": "varchar",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "onGoing",
+          "data_type": "tinyint",
+          "description": "onGoing field from master_goals."
+        },
+        {
+          "name": "is_adminGoal",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "applied_designations",
+          "data_type": "varchar",
+          "description": "applied_designations field from master_goals."
+        },
+        {
+          "name": "is_required",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "tooltip_desc",
+          "data_type": "varchar",
+          "description": "Description text."
+        },
+        {
+          "name": "target_date",
+          "data_type": "date",
+          "description": "Target/due date for the goal or item."
+        },
+        {
+          "name": "goal_initiate_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "is_stream",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "weightage",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `master_goals` when the user asks about master table for goal definitions, descriptions, tags, weightage, target dates, and designation applicability."
+    },
+    {
+      "table_name": "migration_log",
+      "description": "Stores database/data migration execution logs, statuses, and errors.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "migration_step",
+          "data_type": "varchar",
+          "description": "migration_step field from migration_log."
+        },
+        {
+          "name": "action",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "records_affected",
+          "data_type": "int",
+          "description": "records_affected field from migration_log."
+        },
+        {
+          "name": "status",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "error_message",
+          "data_type": "text",
+          "description": "error_message field from migration_log."
+        },
+        {
+          "name": "executed_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `migration_log` when the user asks about stores database/data migration execution logs, statuses, and errors."
+    },
+    {
+      "table_name": "notification_bell",
+      "description": "Stores user notification messages, related object IDs, read status, and timestamps.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "user_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "type",
+          "data_type": "varchar",
+          "description": "type field from notification_bell."
+        },
+        {
+          "name": "title",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "message",
+          "data_type": "text",
+          "description": "message field from notification_bell."
+        },
+        {
+          "name": "related_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "is_read",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "read_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `notification_bell` when the user asks about stores user notification messages, related object ids, read status, and timestamps."
+    },
+    {
+      "table_name": "notification_settings",
+      "description": "Stores notification configuration by notification type.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "notification_type",
+          "data_type": "varchar",
+          "description": "notification_type field from notification_settings."
+        },
+        {
+          "name": "is_enabled",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "updated_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `notification_settings` when the user asks about stores notification configuration by notification type."
+    },
+    {
+      "table_name": "recommendations",
+      "description": "Stores employee recommendations, recommendation text, status, recommender, and recommended employee.",
+      "columns": [
+        {
+          "name": "recommendation_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "recommended_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "recommended_to",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "position",
+          "data_type": "varchar",
+          "description": "position field from recommendations."
+        },
+        {
+          "name": "recommendation_question",
+          "data_type": "text",
+          "description": "recommendation_question field from recommendations."
+        },
+        {
+          "name": "recommendation_text",
+          "data_type": "text",
+          "description": "recommendation_text field from recommendations."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "recommendations.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `recommendations` when the user asks about stores employee recommendations, recommendation text, status, recommender, and recommended employee."
+    },
+    {
+      "table_name": "remark_approvals",
+      "description": "Stores approval/rejection actions for remarks and related approver details.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "remark_id",
+          "data_type": "int",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "approver_id",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "action",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "rejection_reason",
+          "data_type": "varchar",
+          "description": "rejection_reason field from remark_approvals."
+        },
+        {
+          "name": "action_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `remark_approvals` when the user asks about stores approval/rejection actions for remarks and related approver details."
+    },
+    {
+      "table_name": "remarks_table",
+      "description": "Stores employee goal remarks, feedback ratings, submitted status, files, and remark period.",
+      "columns": [
+        {
+          "name": "user_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "remarks",
+          "data_type": "varchar",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "enteredDate",
+          "data_type": "date",
+          "description": "enteredDate field from remarks_table."
+        },
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "goal_mapping_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "given_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "fileId",
+          "data_type": "varchar",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "fileName",
+          "data_type": "varchar",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "fileUrl",
+          "data_type": "varchar",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "unique_RemarkId",
+          "data_type": "int",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "is_submitted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "performance_rating",
+          "data_type": "decimal",
+          "description": "Numeric metric/rating/score/weightage value."
+        },
+        {
+          "name": "remark_year",
+          "data_type": "int",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "remark_month",
+          "data_type": "varchar",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `remarks_table` when the user asks about stores employee goal remarks, feedback ratings, submitted status, files, and remark period."
+    },
+    {
+      "table_name": "remarks_threads",
+      "description": "Stores threaded discussions/comments on goal remarks, including status and approval flags.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "user_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "parent_remark_id",
+          "data_type": "int",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "remark_text",
+          "data_type": "varchar",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "remark_type",
+          "data_type": "enum",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "status",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "sub_feedback_id",
+          "data_type": "tinyint",
+          "description": "Feedback information or feedback reference."
+        },
+        {
+          "name": "by_lead",
+          "data_type": "varchar",
+          "description": "by_lead field from remarks_threads."
+        },
+        {
+          "name": "approved_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "is_agree",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "is_approve",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "datetime",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `remarks_threads` when the user asks about stores threaded discussions/comments on goal remarks, including status and approval flags."
+    },
+    {
+      "table_name": "rnr_approval_actions",
+      "description": "Stores Rewards and Recognition nomination approval actions by approval level.",
+      "columns": [
+        {
+          "name": "action_id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "nomination_id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "level",
+          "data_type": "enum",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "approver_id",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "action",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "remarks",
+          "data_type": "text",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "is_override",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "overridden_level",
+          "data_type": "enum",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "acted_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "created_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `rnr_approval_actions` when the user asks about stores rewards and recognition nomination approval actions by approval level."
+    },
+    {
+      "table_name": "rnr_categories",
+      "description": "Master table for Rewards and Recognition categories.",
+      "columns": [
+        {
+          "name": "category_id",
+          "data_type": "int",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "category_name",
+          "data_type": "varchar",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "category_description",
+          "data_type": "varchar",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "is_active",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "created_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "modified_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "is_delete",
+          "data_type": "int",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "rnr_categories.is_delete = 0",
+        "rnr_categories.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `rnr_categories` when the user asks about master table for rewards and recognition categories."
+    },
+    {
+      "table_name": "rnr_cycle_categories",
+      "description": "Maps RnR cycles to applicable RnR categories.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "cycle_id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "category_id",
+          "data_type": "int",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "created_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `rnr_cycle_categories` when the user asks about maps rnr cycles to applicable rnr categories."
+    },
+    {
+      "table_name": "rnr_cycles",
+      "description": "Stores Rewards and Recognition cycle details, dates, status, and audit fields.",
+      "columns": [
+        {
+          "name": "cycle_id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "cycle_name",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "cycle_year",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "cycle_sequence",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "nomination_start_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "nomination_end_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "status",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "created_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "modified_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "activated_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "activated_by",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "closed_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "closed_by",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "int",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "rnr_cycles.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `rnr_cycles` when the user asks about stores rewards and recognition cycle details, dates, status, and audit fields."
+    },
+    {
+      "table_name": "rnr_nominations",
+      "description": "Stores RnR nominations, nominees, nominators, category, approval levels, status, and outcome.",
+      "columns": [
+        {
+          "name": "nomination_id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "cycle_id",
+          "data_type": "int",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "nominee_employee_id",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "category_id",
+          "data_type": "int",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "nominated_by_employee_id",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "nominator_role_level",
+          "data_type": "enum",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "l2",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "l3",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "justification",
+          "data_type": "text",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "attachment_path",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "attachment_filename",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "certificate_path",
+          "data_type": "varchar",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "certificate_filename",
+          "data_type": "varchar",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "certificate_uploaded_by",
+          "data_type": "varchar",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "certificate_uploaded_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "current_status",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "current_pending_level",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "final_outcome",
+          "data_type": "enum",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "nomination_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "l1",
+          "data_type": "varchar",
+          "description": "Rewards and Recognition cycle/nomination related field."
+        },
+        {
+          "name": "created_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `rnr_nominations` when the user asks about stores rnr nominations, nominees, nominators, category, approval levels, status, and outcome."
+    },
+    {
+      "table_name": "skills",
+      "description": "Stores employee skills, proficiency, certificates, experience, and approval/status details.",
+      "columns": [
+        {
+          "name": "skill_id",
+          "data_type": "int",
+          "description": "Skill reference or skill-related detail."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "skill_name",
+          "data_type": "varchar",
+          "description": "Skill reference or skill-related detail."
+        },
+        {
+          "name": "proficiency_level",
+          "data_type": "varchar",
+          "description": "proficiency_level field from skills."
+        },
+        {
+          "name": "certificate",
+          "data_type": "text",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "where_earned",
+          "data_type": "varchar",
+          "description": "where_earned field from skills."
+        },
+        {
+          "name": "months_of_experience",
+          "data_type": "int",
+          "description": "months_of_experience field from skills."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "cid",
+          "data_type": "int",
+          "description": "Certification/certificate reference or related details."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "skills.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `skills` when the user asks about stores employee skills, proficiency, certificates, experience, and approval/status details."
+    },
+    {
+      "table_name": "status",
+      "description": "Master table for status values and display colors.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "status_name",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "color",
+          "data_type": "varchar",
+          "description": "color field from status."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `status` when the user asks about master table for status values and display colors."
+    },
+    {
+      "table_name": "stg_kra_excel",
+      "description": "Staging table for imported KRA Excel data including mapped title, goals, criteria, rating, and score.",
+      "columns": [
+        {
+          "name": "sheet_name",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "level",
+          "data_type": "varchar",
+          "description": "level field from stg_kra_excel."
+        },
+        {
+          "name": "mapped_title",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "category",
+          "data_type": "varchar",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "goals",
+          "data_type": "varchar",
+          "description": "goals field from stg_kra_excel."
+        },
+        {
+          "name": "weightage",
+          "data_type": "decimal",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "measurement_criteria",
+          "data_type": "varchar",
+          "description": "measurement_criteria field from stg_kra_excel."
+        },
+        {
+          "name": "rating",
+          "data_type": "int",
+          "description": "Numeric metric/rating/score/weightage value."
+        },
+        {
+          "name": "weighted_score",
+          "data_type": "int",
+          "description": "Numeric metric/rating/score/weightage value."
+        }
+      ],
+      "recommended_filters": [],
+      "llm_usage_hint": "Use `stg_kra_excel` when the user asks about staging table for imported kra excel data including mapped title, goals, criteria, rating, and score."
+    },
+    {
+      "table_name": "tag_category",
+      "description": "Maps tags, categories, and designations for KRA classification.",
+      "columns": [
+        {
+          "name": "mapping_id",
+          "data_type": "int",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "tag_id",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "designation_id",
+          "data_type": "int",
+          "description": "Designation master identifier."
+        },
+        {
+          "name": "category_id",
+          "data_type": "int",
+          "description": "Category reference or category display information."
+        },
+        {
+          "name": "is_active",
+          "data_type": "bigint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "timestamp",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [
+        "tag_category.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `tag_category` when the user asks about maps tags, categories, and designations for kra classification."
+    },
+    {
+      "table_name": "tags",
+      "description": "Master table for KRA tags.",
+      "columns": [
+        {
+          "name": "tag_id",
+          "data_type": "int",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "tag",
+          "data_type": "varchar",
+          "description": "Tag/tag-category reference or value."
+        },
+        {
+          "name": "is_active",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "created_at",
+          "data_type": "timestamp",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [
+        "tags.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `tags` when the user asks about master table for kra tags."
+    },
+    {
+      "table_name": "user_badges",
+      "description": "Stores badges awarded/requested for employees with highlighted skills, status, and audit fields.",
+      "columns": [
+        {
+          "name": "user_badges_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "badge_master_id",
+          "data_type": "int",
+          "description": "Badge reference, badge definition, or badge display information."
+        },
+        {
+          "name": "highlighted_skill",
+          "data_type": "varchar",
+          "description": "Skill reference or skill-related detail."
+        },
+        {
+          "name": "description",
+          "data_type": "text",
+          "description": "Description text."
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "description": "Status/action value for this workflow record."
+        },
+        {
+          "name": "created_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "bit",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "user_badges.is_deleted = 0"
+      ],
+      "llm_usage_hint": "Use `user_badges` when the user asks about stores badges awarded/requested for employees with highlighted skills, status, and audit fields."
+    },
+    {
+      "table_name": "user_feedback",
+      "description": "Stores employee feedback, feedback giver, feedback date/year, likes, and active status.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "feedback_desc",
+          "data_type": "varchar",
+          "description": "Feedback information or feedback reference."
+        },
+        {
+          "name": "feedbackGivenBy",
+          "data_type": "varchar",
+          "description": "Feedback information or feedback reference."
+        },
+        {
+          "name": "modified_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "feedback_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "date",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "isactive",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "likes",
+          "data_type": "tinyint",
+          "description": "Numeric metric/rating/score/weightage value."
+        },
+        {
+          "name": "employee_name",
+          "data_type": "varchar",
+          "description": "Display name/title field."
+        },
+        {
+          "name": "feedback_year",
+          "data_type": "int",
+          "description": "Feedback information or feedback reference."
+        }
+      ],
+      "recommended_filters": [
+        "user_feedback.isactive = 1"
+      ],
+      "llm_usage_hint": "Use `user_feedback` when the user asks about stores employee feedback, feedback giver, feedback date/year, likes, and active status."
+    },
+    {
+      "table_name": "user_goal_mapping",
+      "description": "Stores assigned employee goals, status, target dates, assigned by, goal description, and active/delete flags.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "status_id",
+          "data_type": "varchar",
+          "description": "Status identifier/value for the goal."
+        },
+        {
+          "name": "target_date",
+          "data_type": "date",
+          "description": "Target/due date for the goal or item."
+        },
+        {
+          "name": "assigned_date",
+          "data_type": "datetime",
+          "description": "Date and time when the goal was assigned."
+        },
+        {
+          "name": "assigned_by",
+          "data_type": "varchar",
+          "description": "Employee/user who assigned the goal."
+        },
+        {
+          "name": "modified_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "remark_for_Targetdate",
+          "data_type": "date",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "isactive",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "goal_desc",
+          "data_type": "varchar",
+          "description": "Goal description."
+        },
+        {
+          "name": "is_adminGoal",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "initialTargetDate",
+          "data_type": "date",
+          "description": "initialTargetDate field from user_goal_mapping."
+        },
+        {
+          "name": "isDelete",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "user_goal_mapping.isDelete = 0",
+        "user_goal_mapping.isactive = 1"
+      ],
+      "llm_usage_hint": "Use `user_goal_mapping` when the user asks about stores assigned employee goals, status, target dates, assigned by, goal description, and active/delete flags."
+    },
+    {
+      "table_name": "user_goal_mapping_backup_pre_migration",
+      "description": "Backup copy of user_goal_mapping before migration.",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "description": "Primary/internal identifier for this table."
+        },
+        {
+          "name": "goal_id",
+          "data_type": "int",
+          "description": "Goal identifier."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "status_id",
+          "data_type": "varchar",
+          "description": "Status identifier/value for the goal."
+        },
+        {
+          "name": "target_date",
+          "data_type": "date",
+          "description": "Target/due date for the goal or item."
+        },
+        {
+          "name": "assigned_date",
+          "data_type": "datetime",
+          "description": "Date and time when the goal was assigned."
+        },
+        {
+          "name": "assigned_by",
+          "data_type": "varchar",
+          "description": "Employee/user who assigned the goal."
+        },
+        {
+          "name": "modified_by",
+          "data_type": "varchar",
+          "description": "Employee/user responsible for this action or role in the workflow."
+        },
+        {
+          "name": "remark_for_Targetdate",
+          "data_type": "date",
+          "description": "Remark/comment/feedback text or related remark identifier."
+        },
+        {
+          "name": "modified_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "isactive",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "goal_desc",
+          "data_type": "varchar",
+          "description": "Goal description."
+        },
+        {
+          "name": "is_adminGoal",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "initialTargetDate",
+          "data_type": "date",
+          "description": "initialTargetDate field from user_goal_mapping_backup_pre_migration."
+        },
+        {
+          "name": "isDelete",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        }
+      ],
+      "recommended_filters": [
+        "user_goal_mapping_backup_pre_migration.isDelete = 0",
+        "user_goal_mapping_backup_pre_migration.isactive = 1"
+      ],
+      "llm_usage_hint": "Use `user_goal_mapping_backup_pre_migration` when the user asks about backup copy of user_goal_mapping before migration."
+    },
+    {
+      "table_name": "user_table",
+      "description": "Employee master table containing employee name, email, ID, role, stream, designation, reporting manager, active/delete status, and join date.",
+      "columns": [
+        {
+          "name": "firstname",
+          "data_type": "varchar",
+          "description": "Employee first name."
+        },
+        {
+          "name": "lastname",
+          "data_type": "varchar",
+          "description": "Employee last name."
+        },
+        {
+          "name": "is_active",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "is_delete",
+          "data_type": "tinyint",
+          "description": "Flag or timestamp used to indicate active/deleted/workflow state."
+        },
+        {
+          "name": "L1",
+          "data_type": "varchar",
+          "description": "L1 field from user_table."
+        },
+        {
+          "name": "reporting_manager",
+          "data_type": "varchar",
+          "description": "Reporting manager for the employee."
+        },
+        {
+          "name": "e_mail",
+          "data_type": "varchar",
+          "description": "Employee or user email address."
+        },
+        {
+          "name": "employee_id",
+          "data_type": "varchar",
+          "description": "Employee/user identifier used to link records to an employee."
+        },
+        {
+          "name": "role",
+          "data_type": "varchar",
+          "description": "role field from user_table."
+        },
+        {
+          "name": "folder_id",
+          "data_type": "varchar",
+          "description": "Identifier used as a key or reference."
+        },
+        {
+          "name": "stream",
+          "data_type": "varchar",
+          "description": "Employee stream/business stream."
+        },
+        {
+          "name": "designation",
+          "data_type": "varchar",
+          "description": "Employee designation stored on the employee record."
+        },
+        {
+          "name": "shift_timings",
+          "data_type": "varchar",
+          "description": "shift_timings field from user_table."
+        },
+        {
+          "name": "created_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "updated_at",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        },
+        {
+          "name": "password",
+          "data_type": "varchar",
+          "description": "password field from user_table."
+        },
+        {
+          "name": "profile_url",
+          "data_type": "longtext",
+          "description": "File/blob/attachment metadata or URL/path."
+        },
+        {
+          "name": "designation_id",
+          "data_type": "int",
+          "description": "Designation master identifier."
+        },
+        {
+          "name": "joined_date",
+          "data_type": "datetime",
+          "description": "Date/time audit or business event field."
+        }
+      ],
+      "recommended_filters": [
+        "user_table.is_delete = 0",
+        "user_table.is_active = 1"
+      ],
+      "llm_usage_hint": "Use `user_table` when the user asks about employee master table containing employee name, email, id, role, stream, designation, reporting manager, active/delete status, and join date."
+    }
+  ],
+  "relationship_candidates": [
+    {
+      "column": "additional_approval_id",
+      "tables": [
+        "additional_approval",
+        "approval_history"
+      ],
+      "description": "Possible relationship via shared column `additional_approval_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "badge_master_id",
+      "tables": [
+        "additional_approval",
+        "badge_master",
+        "kra_blob",
+        "user_badges"
+      ],
+      "description": "Possible relationship via shared column `badge_master_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "approver_id",
+      "tables": [
+        "additional_approval",
+        "approval_history",
+        "certification_approvals",
+        "remark_approvals",
+        "rnr_approval_actions"
+      ],
+      "description": "Possible relationship via shared column `approver_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "session_id",
+      "tables": [
+        "ai_messages",
+        "ai_reports"
+      ],
+      "description": "Possible relationship via shared column `session_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "report_id",
+      "tables": [
+        "ai_report_versions",
+        "ai_shares"
+      ],
+      "description": "Possible relationship via shared column `report_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "user_id",
+      "tables": [
+        "ai_reports",
+        "ai_sessions",
+        "ai_shares",
+        "conversation_history",
+        "notification_bell",
+        "remarks_table",
+        "remarks_threads"
+      ],
+      "description": "Possible relationship via shared column `user_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "skill_id",
+      "tables": [
+        "approval_history",
+        "skills"
+      ],
+      "description": "Possible relationship via shared column `skill_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "cid",
+      "tables": [
+        "approval_history",
+        "certificates",
+        "certification_approvals",
+        "kra_blob",
+        "skills"
+      ],
+      "description": "Possible relationship via shared column `cid`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "user_badges_id",
+      "tables": [
+        "approval_history",
+        "user_badges"
+      ],
+      "description": "Possible relationship via shared column `user_badges_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "employee_id",
+      "tables": [
+        "certificates",
+        "goal_history",
+        "skills",
+        "user_badges",
+        "user_feedback",
+        "user_goal_mapping",
+        "user_goal_mapping_backup_pre_migration",
+        "user_table"
+      ],
+      "description": "Possible relationship via shared column `employee_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "designation_id",
+      "tables": [
+        "designation",
+        "tag_category",
+        "user_table"
+      ],
+      "description": "Possible relationship via shared column `designation_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "remark_id",
+      "tables": [
+        "disagree_remarks_master",
+        "remark_approvals"
+      ],
+      "description": "Possible relationship via shared column `remark_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "goal_id",
+      "tables": [
+        "disagree_remarks_master",
+        "goal_history",
+        "goal_tag_category",
+        "master_goal_tag_cat",
+        "master_goals",
+        "remarks_table",
+        "remarks_threads",
+        "user_goal_mapping",
+        "user_goal_mapping_backup_pre_migration"
+      ],
+      "description": "Possible relationship via shared column `goal_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "tag_cat_id",
+      "tables": [
+        "goal_tag_category",
+        "master_goal_tag_cat",
+        "master_goals"
+      ],
+      "description": "Possible relationship via shared column `tag_cat_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "category_id",
+      "tables": [
+        "master_categories",
+        "rnr_categories",
+        "rnr_cycle_categories",
+        "rnr_nominations",
+        "tag_category"
+      ],
+      "description": "Possible relationship via shared column `category_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "nomination_id",
+      "tables": [
+        "rnr_approval_actions",
+        "rnr_nominations"
+      ],
+      "description": "Possible relationship via shared column `nomination_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "cycle_id",
+      "tables": [
+        "rnr_cycle_categories",
+        "rnr_cycles",
+        "rnr_nominations"
+      ],
+      "description": "Possible relationship via shared column `cycle_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "tag_id",
+      "tables": [
+        "tag_category",
+        "tags"
+      ],
+      "description": "Possible relationship via shared column `tag_id`. Validate join direction/business rule before use."
+    },
+    {
+      "column": "status_id",
+      "tables": [
+        "user_goal_mapping",
+        "user_goal_mapping_backup_pre_migration"
+      ],
+      "description": "Possible relationship via shared column `status_id`. Validate join direction/business rule before use."
+    }
+  ]
+}
