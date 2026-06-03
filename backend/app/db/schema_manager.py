@@ -59,6 +59,12 @@ class SchemaManager:
         self._schema_loaded = True
         logger.info(f"Schema refreshed: {len(schema)} tables")
 
+        # If the rich JSON registry was not already loaded, sync from live DB
+        # so that table/column validation still works even without the JSON file.
+        from app.db.schema_registry import schema_registry  # lazy import
+        if not schema_registry.is_loaded():
+            schema_registry.load_from_schema_manager(schema)
+
         # Invalidate suggestion cache so next greeting/off-topic call rebuilds
         from app.services.suggestion_builder import suggestion_builder  # lazy import
         suggestion_builder.invalidate()

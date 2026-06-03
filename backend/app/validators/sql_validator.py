@@ -93,6 +93,32 @@ class SQLValidator:
                 sql,
             )
 
+        # ── Schema-grounded table validation ─────────────────────────────────
+        # Rejects SQL that references tables absent from kra_schema_llm_context.json.
+        # Fail-open when the registry is not yet loaded (cold-start safety).
+        try:
+            from app.db.schema_registry import schema_registry
+            if schema_registry.is_loaded():
+                invalid_tables = schema_registry.validate_sql_tables(sql)
+                if invalid_tables:
+                    names = ", ".join(f"'{t}'" for t in invalid_tables)
+                    valid_list = ", ".join(schema_registry.get_schema_table_list())
+                    logger.warning(
+                        "[sql_validator] hallucinated table(s) %s blocked user=%s",
+                        names, user_id,
+                    )
+                    return (
+                        ValidationStatus.INVALID,
+                        (
+                            f"Unknown table(s): {names}. "
+                            "Use ONLY tables defined in the KRA schema. "
+                            f"Available tables: {valid_list}"
+                        ),
+                        sql,
+                    )
+        except Exception as exc:
+            logger.warning("[sql_validator] schema registry check skipped: %s", exc)
+
         logger.debug(f"SQL validated for user={user_id}: {sql[:100]}…")
         return ValidationStatus.VALID, "SQL is valid", sql
 

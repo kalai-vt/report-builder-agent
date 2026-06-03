@@ -21,13 +21,30 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(application):
     logger.info("KRA Report Builder Agent starting up...")
+    from pathlib import Path
+
     from app.db.connection import db_manager
     from app.db.schema_manager import schema_manager
+    from app.db.schema_registry import schema_registry
+
+    # ── 1. Load rich schema-context JSON (primary source for LLM grounding) ──
+    json_path = Path(__file__).parent / "data" / "kra_schema_llm_context.json"
+    if schema_registry.load_from_llm_context_json(str(json_path)):
+        logger.info(
+            "Schema registry loaded from kra_schema_llm_context.json (%d tables)",
+            len(schema_registry.get_valid_tables()),
+        )
+    else:
+        logger.warning(
+            "kra_schema_llm_context.json not found — registry will fall back to live DB"
+        )
 
     if db_manager.health_check():
         logger.info("Database connection OK")
         try:
             schema_manager.refresh_schema()
+            # refresh_schema() syncs the registry from DB only when the JSON
+            # was not already loaded (see schema_manager.py).
             logger.info("Schema loaded on startup")
         except Exception as e:
             logger.warning(f"Schema load on startup failed: {e}")

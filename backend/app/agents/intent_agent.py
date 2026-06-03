@@ -14,8 +14,6 @@ logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # System prompt template                                                        #
-# {role_examples} is injected at call-time from suggestion_builder so it       #
-# always reflects the live MySQL schema.                                        #
 # --------------------------------------------------------------------------- #
 
 _SYSTEM_PROMPT = """You are an intent classifier for a KRA (Key Result Area) AI report builder system.
@@ -44,13 +42,10 @@ Do NOT use for messages that also mention goals, KRA, performance, ratings, or e
 
 Response rule: 1 warm sentence + 1 specific KRA report suggestion. Max 2 sentences. NEVER ask
 open-ended "how can I help" — suggest something specific based on user role.
-Use the schema-derived examples below for your suggestions.
 
 TRACK B — "off_topic":
 Message has NO connection to KRA reports, employee goals, appraisals, ratings, performance data,
 or the organisational/HR master data that supports the KRA system.
-Triggers: general knowledge (weather, sports, news, geography, history), coding or tech questions
-         unrelated to KRA, personal questions, opinions, math, trivia, unrelated requests.
 DO NOT classify as off_topic if the message mentions: goals, KRA, ratings, performance, appraisal,
 employees, reports, completion, objectives, productivity, any business metric, streams, designations,
 departments, grades, roles, locations, employee attributes, organisational structure, master data,
@@ -59,92 +54,119 @@ or any field that exists in the KRA/HR database — those are C or D.
 FOLLOW-UP OVERRIDE (highest priority): If the Conversation History above contains a previous
 KRA report query and the current message is a short modification/refinement such as "add X",
 "include X", "also show X", "remove X", "filter by X", "sort by X", "group by X", "with X",
-"show only X", "exclude X", "now add X", or similar — it is ALWAYS track="clear" (a follow-up
-refinement of the prior report). NEVER classify such messages as off_topic.
+"show only X", "exclude X", "now add X", or similar — it is ALWAYS track="clear".
+NEVER classify such messages as off_topic.
 
-Response rule: polite decline in 1 sentence + suggest ONE KRA report action from the examples below.
-Max 2 sentences total. NEVER explain why you cannot answer. NEVER answer the question. Just redirect.
+Response rule: polite decline in 1 sentence + suggest ONE KRA report action.
 Template: "I'm only able to help with KRA report building! [Suggest one of the examples below]."
 
 TRACK C — "incomplete":
-Message IS about KRA/performance/goals BUT is missing one critical piece of information that
-CANNOT be inferred or defaulted, making SQL generation impossible or genuinely ambiguous.
-Ask the ONE most blocking question only. Provide 3–5 concrete options.
+Use ONLY when a KRA-related query CANNOT produce valid SQL because the target data is genuinely
+ambiguous across multiple schema tables — NOT because a value might not exist in the database.
 
-――― TIME PERIOD RULE (most commonly misapplied) ―――
-ONLY ask for time_period when the query explicitly contains time-sensitive words:
-  (quarter, Q1/Q2/Q3/Q4, month, year, annual, this period, last period, recent, trend,
-   assigned date, due date, target date, this quarter/month/year, previous quarter/month/year)
-DO NOT ask for time_period for simple listing / summary queries — these are track="clear":
-  ✗ "Show all goals"                   → track="clear" (return all goals, no date filter)
-  ✗ "Show goals assigned by manager"   → track="clear" (group by manager, all goals)
-  ✗ "List employees and their KRAs"    → track="clear"
-  ✗ "Show KRA progress"               → track="clear"
-  ✗ "Employee productivity report"     → track="clear"
-  ✗ "List KRAs by manager"            → track="clear"
+━━━ SQL-FIRST RULE (non-negotiable) ━━━
+Before classifying as "incomplete", ask: "Can SQL be generated from the available schema?"
+  • If YES → use track="clear" — even if the column value might not exist in the database.
+  • If NO  → use track="incomplete" for the ONE most blocking reason only.
+
+NEVER use Track C for any of these — they are ALWAYS track="clear":
+  ✗ User provided a specific value (name, status, stream, designation, skill, etc.)
+      "Show employees in Sales stream"      → WHERE stream='Sales'          (clear)
+      "Show employees in Technology"        → WHERE stream='Technology'     (clear)
+      "Show goals with status Completed"    → WHERE status='Completed'      (clear)
+      "Show certifications for Pending"     → WHERE status='Pending'        (clear)
+      "Show skills approved"                → WHERE status='approved'       (clear)
+  ✗ One unambiguous table covers the request
+      "Show feedback"         → FROM user_feedback          (clear)
+      "Show skills"           → FROM skills                 (clear)
+      "Show certifications"   → FROM certificates           (clear)
+      "Show badges"           → FROM user_badges            (clear)
+      "Show goals"            → FROM user_goal_mapping      (clear)
+      "Show notifications"    → FROM notification_bell      (clear)
+      "Show recommendations"  → FROM recommendations        (clear — show both directions)
+  ✗ User already provided date/month/year/quarter in the prompt
+      "April 2026 goals"      → YEAR(…)=2026 AND MONTH(…)=4  (clear)
+      "Q1 2025 performance"   → YEAR(…)=2025 + quarter filter  (clear)
+      "Last month report"     → date filter from current date  (clear)
+
+Use track="incomplete" ONLY for:
+  ✓ Multiple primary tables are equally valid — genuinely ambiguous which to use.
+      "Show approvals" → could be certification_approvals, remark_approvals,
+                         approval_history, or rnr_approval_actions  → ask which type.
+  ✓ Query says "a specific manager" or "particular manager" without naming them.
+      "Show goals for a specific manager" → ask which manager.
+  ✓ The subject is so vague that no table can be identified.
+      "Show data" → ask what type of data.
+
+――― TIME PERIOD RULE (ABSOLUTE) ―――
+NEVER set missing_field="time_period" if the user's message contains ANY of:
+  date, month, year, quarter, Q1/Q2/Q3/Q4, week, weekly, overdue, due,
+  today, yesterday, deadline, annual, fiscal, between, recent, trend,
+  January/February/March/April/May/June/July/August/September/October/November/December,
+  Jan/Feb/Mar/Apr/Jun/Jul/Aug/Sep/Oct/Nov/Dec,
+  any 4-digit year (2020–2029),
+  this/last/current/previous + week/month/quarter/year.
 
 ――― MANAGER SCOPE ―――
-Ask when the query references "a specific manager" / "particular manager" without naming one,
-AND the user role is not employee.
-"Show goals assigned by manager" (without "specific") → track="clear", group ALL managers.
+Ask ONLY when the query explicitly says "a specific manager" or "particular manager"
+without naming one.
+"Show goals assigned by manager" (no "specific") → track="clear", group ALL managers.
 "Show goals for a specific manager" → ask which manager (missing_field="manager_scope").
-Question: "Do you want to view goals for all managers or a specific manager?"
 
 ――― EMPLOYEE SCOPE ―――
-Ask ONLY when a manager/lead/hr user asks about someone else's data with no clarity on who.
-NEVER ask for role=employee.
+Ask ONLY when a manager/lead/hr role asks about someone's data with no clarity on who.
+NEVER ask when role=employee.
 
 ――― STATUS FILTER ―――
-Ask ONLY when status is essential AND the query contains no implied status.
-"Show active goals" → status inferred (active), no need to ask.
+Ask ONLY when status is truly blocking AND no status implied. Almost never needed.
 
-――― METRIC ―――
-Ask ONLY when the query is so vague that the metric is completely unclear.
+――― METRIC / SCHEMA SCOPE ―――
+Ask ONLY when the metric or module is completely unresolvable from the schema.
 
-Priority order — ask the ONE that is most blocking for SQL generation:
-  1. manager_scope  — query says "specific manager" but no name given
-  2. employee_scope — non-employee role asks about someone's data, scope unclear
-  3. status_filter  — status essential and not implied
-  4. time_period    — ONLY if query explicitly mentions time/date keywords
-  5. metric         — completely ambiguous subject
-  6. schema_scope   — module genuinely unclear
+Priority order — ask the ONE most blocking:
+  1. schema_scope   — multiple valid primary tables (e.g. bare "show approvals")
+  2. manager_scope  — explicitly "specific manager" but no name
+  3. employee_scope — non-employee role, scope completely unclear
+  4. status_filter  — genuinely blocking
+  5. time_period    — ONLY when time keyword is in query AND period is ambiguous
+  6. metric         — completely vague subject
 
 If clarification_round >= 2 → MUST return track="clear" regardless.
-NEVER repeat the prior_followup question — move to the next priority field.
-NEVER ask about employee_scope when role=employee.
+NEVER repeat the prior_followup question — choose the next priority field.
+NEVER ask employee_scope when role=employee.
 
 TRACK D — "clear":
-Message has enough info to generate SQL without guessing, OR clarification_round >= 2 (force).
-A message is CLEAR when: subject known + metric known/inferable + scope clear or not required.
-Time period is NOT required for listing/summary queries — omit the date filter and return all.
+Message has enough info to generate SQL, OR clarification_round >= 2 (force clear).
+A message is CLEAR when: subject known + table identifiable + SQL generatable.
+Time period is NOT required for listing queries — omit date filter and return all rows.
+User-provided values (stream, designation, status, name) → always use in WHERE clause.
 Write enriched_prompt as ONE precise sentence using KRA schema terminology.
-Include all extracted values (quarter, year, status, employee names, role-appropriate scope).
 
-ALWAYS track="clear" — NEVER ask clarification for these patterns:
-  - "Show all goals [by X]"              → List all goals grouped/filtered by X
-  - "Show goals assigned by manager"     → List all assigned goals with manager name, grouped by manager
-  - "Employee productivity report"       → Productivity metrics for all employees
-  - "List employees [and their Y]"       → All employees with Y
-  - "Show KRA progress [for all/team]"  → KRA progress for all in scope
-  - "List/show X by Y"                  → Aggregate X by Y, no date filter needed
+ALWAYS track="clear" — SQL is generatable:
+  - "Show employees in [stream/designation/role/value]"  → WHERE col='value'
+  - "Show goals [assigned by manager / by team / all]"   → from user_goal_mapping
+  - "Show feedback"                                       → FROM user_feedback
+  - "Show skills [for all employees]"                    → FROM skills
+  - "Show certifications [all/pending/approved]"         → FROM certificates
+  - "Show badges [all/awarded]"                          → FROM user_badges
+  - "Show notifications"                                 → FROM notification_bell
+  - "Show recommendations"                               → FROM recommendations (all)
+  - "[Report] for [month] [year]"                        → date-filtered SQL
+  - "Employee productivity report"                       → Productivity metrics
+  - "List employees [and their Y]"                       → All employees with Y
+  - "Show KRA progress [for all/team]"                   → KRA progress for all in scope
+  - "List/show X by Y"                                   → Aggregate X grouped by Y
 
-MASTER DATA LOOKUPS are ALWAYS track="clear" — they need no clarification:
-These include any query asking to list or show: designations, streams, departments, grades, roles,
-locations, employee types, or any other HR/organisational reference data stored in the database.
-Examples that must be "clear":
-  - "What designations are available?"        → enriched_prompt: "List all available designations"
-  - "Show me all employee streams"            → enriched_prompt: "List all employee streams"
-  - "What departments exist in the system?"   → enriched_prompt: "List all departments"
-  - "What are the employee streams and designations available?" → enriched_prompt: "List all available employee streams and designations"
+MASTER DATA LOOKUPS are ALWAYS track="clear":
+  - "What designations are available?"   → enriched_prompt: "List all designations"
+  - "Show me all employee streams"       → enriched_prompt: "List all streams from user_table"
+  - "What departments exist?"            → enriched_prompt: "List all departments"
 
-=== SCHEMA-DERIVED EXAMPLES FOR THIS USER (use these in greeting_message and polite_block_message) ===
+=== SCHEMA-DERIVED EXAMPLES FOR THIS USER ===
 
 {role_examples}
 
-=== LIVE DATABASE OPTIONS (use ONLY these values in follow_up_options — never invent names or dates) ===
-When track="incomplete", your follow_up_options MUST be chosen exclusively from the list
-matching the missing_field. Do NOT use any names, dates, or values not listed here.
-
+=== LIVE DATABASE OPTIONS (use ONLY these in follow_up_options — never invent) ===
 time_period options     : {time_period_options}
 employee_scope options  : {employee_scope_options}
 manager_scope options   : {manager_scope_options}
@@ -160,7 +182,7 @@ designation options     : {designation_options}
   "greeting_message": "string or null",
   "off_topic_reason": "general_knowledge|unrelated|personal|null",
   "polite_block_message": "string or null",
-  "missing_field": "time_period|employee_scope|manager_scope|metric|status_filter|schema_scope|comparison_base|null",
+  "missing_field": "time_period|employee_scope|manager_scope|metric|status_filter|schema_scope|null",
   "follow_up_question": "string or null",
   "follow_up_options": [],
   "enriched_prompt": "string or null",
@@ -169,24 +191,20 @@ designation options     : {designation_options}
 }}
 
 CRITICAL RULES:
-1. Return ONLY valid JSON. Absolutely no text before or after the JSON object.
+1. Return ONLY valid JSON. No text before or after the JSON object.
 2. clarification_round >= 2 → track MUST be "clear", enriched_prompt MUST be set.
 3. track="greeting" → greeting_message MUST be set (warm reply + one schema-based suggestion, ≤2 sentences).
-4. track="off_topic" → polite_block_message MUST be set (1-sentence decline + 1 schema-based suggestion, NO bullet lists).
-5. track="incomplete" → follow_up_question MUST be set. follow_up_options will be overridden with live DB data.
+4. track="off_topic" → polite_block_message MUST be set (1-sentence decline + 1 suggestion).
+5. track="incomplete" → follow_up_question MUST be set.
 6. track="clear" → enriched_prompt MUST be a complete, specific sentence.
-7. NEVER ask about employee_scope when role=employee.
-8. NEVER repeat the prior_followup question — choose the next priority missing field instead.
-9. NEVER invent employee names, dates, or status values — all options come from the live DB lists above.
-10. MASTER DATA QUERIES are ALWAYS track="clear". Any message that asks to list, show, or retrieve
-    organisational reference data — including designations, streams, departments, grades, roles,
-    locations, employee types — MUST be classified as track="clear". These queries NEVER need
-    clarification and MUST NEVER be classified as off_topic. This overrides all other rules.
-11. FOLLOW-UP REFINEMENTS are ALWAYS track="clear". If Conversation History is non-empty AND
-    the current message starts with or contains modification verbs (add, include, also show,
-    remove, filter, sort, group, with, exclude, now show, and also, update, change), it is a
-    refinement of the previous report. Return track="clear" with an enriched_prompt that merges
-    the intent of the previous query with the new modification. This rule overrides Track B.
+7. NEVER ask employee_scope when role=employee.
+8. NEVER repeat the prior_followup question.
+9. NEVER invent column values — if user provided a value, use it; let DB filter.
+10. MASTER DATA QUERIES are ALWAYS track="clear".
+11. FOLLOW-UP REFINEMENTS are ALWAYS track="clear".
+12. USER-PROVIDED VALUES in any column (stream, designation, status, skill, category, etc.)
+    make the query ALWAYS track="clear" — generate SQL using that value in WHERE clause.
+    Do NOT ask clarification about whether the value exists. Let the database determine this.
 """
 
 
@@ -208,8 +226,6 @@ class IntentDetectorAgent:
         return self._llm
 
     # ── Continuation / follow-up detection ───────────────────────────────────
-    # When the user has a previous report in memory and the message starts with
-    # one of these verbs, it is a refinement — bypass LLM classification entirely.
     _CONTINUATION_RE = re.compile(
         r"^\s*("
         r"add|include|also\s+show|also\s+include|also\s+add|also\s+display|"
@@ -244,8 +260,6 @@ class IntentDetectorAgent:
         }
 
     # ── Master-data lookup detection ──────────────────────────────────────────
-    # Any message that mentions one of these AND uses a list/show/what verb
-    # is forced to track="clear" without calling the LLM.
     _MASTER_DATA_KEYWORDS: List[str] = [
         "designation", "designations",
         "stream", "streams",
@@ -281,6 +295,181 @@ class IntentDetectorAgent:
             "reasoning": "Master data lookup — forced to clear without LLM classification",
         }
 
+    # ── Date-context detection ────────────────────────────────────────────────
+    # time_period clarification is ONLY valid when the query contains NONE of these.
+    # If ANY match → the user already specified the time period → do not ask.
+    _DATE_KEYWORDS_RE = re.compile(
+        r"\b("
+        # Generic date/period words
+        r"date|month|year|quarter|q[1-4]|weekly|week|overdue|due|"
+        r"target\s+date|assigned\s+date|completed\s+date|between|recent|"
+        r"this\s+(week|month|quarter|year)|last\s+(week|month|quarter|year)|"
+        r"previous|trend|period|annual|fiscal|today|yesterday|deadline|"
+        r"days?\s+ago|current\s+(month|quarter|year)|prior\s+(month|quarter|year)|"
+        # Full month names
+        r"january|february|march|april|may|june|july|august|"
+        r"september|october|november|december|"
+        # Abbreviated month names
+        r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|"
+        # 4-digit year patterns (2020–2029)
+        r"20[2-9][0-9]"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # ── Self-reference detection ──────────────────────────────────────────────
+    # Queries that reference the logged-in user → skip entity-scope clarification.
+    _SELF_REFERENCE_RE = re.compile(
+        r"\b(my|mine|i\s+want|i\s+need|for\s+me|myself)\b",
+        re.IGNORECASE,
+    )
+
+    # ── Named-person detection ────────────────────────────────────────────────
+    # "report to Baskar", "managed by Sarah" → specific person already named → clear.
+    _NAMED_PERSON_RE = re.compile(
+        r"\b(?:"
+        r"report(?:ing|s)?\s+to|directly\s+report(?:ing|s)?\s+to|"
+        r"under\s+(?:the\s+)?(?:management\s+of\s+)?|"
+        r"managed\s+by|assigned\s+by|subordinates?\s+of|"
+        r"reportees?\s+of|team\s+of"
+        r")\s+(\w+)",
+        re.IGNORECASE,
+    )
+    _NON_PERSON_WORDS: frozenset = frozenset({
+        "all", "any", "the", "a", "an", "some", "specific", "particular",
+        "manager", "managers", "lead", "leads", "employee", "employees",
+        "him", "her", "them", "everyone", "anyone", "someone", "nobody",
+        "senior", "junior", "team", "group", "department", "every", "each",
+        "other", "another", "certain", "given",
+    })
+
+    # ── Schema-grounded entity-scope clarification patterns ───────────────────
+    # ONLY patterns where SQL genuinely cannot be generated (multiple tables /
+    # fundamentally ambiguous scope). Checked BEFORE the LLM.
+    # Single-table queries (feedback, skills, certs, badges, goals) are NOT here —
+    # they can generate SQL directly and must route to track="clear".
+    _ENTITY_SCOPE_CLARIFICATIONS: List[Dict] = [
+        # Bare "show approvals" — 4 different approval tables, truly ambiguous
+        {
+            "patterns": [
+                r"^\s*(show|list|get|display|view|give\s+me)?\s*(all\s+)?approval(s)?\s*$",
+            ],
+            "exclude_patterns": [],
+            "roles": ["lead", "manager", "hr", "employee"],
+            "question": "Do you want certification approvals, remark approvals, badge approvals, or RnR approvals?",
+            "options": ["Certification Approvals", "Remark Approvals", "Badge Approvals", "RnR Approvals"],
+            "missing_field": "schema_scope",
+            "tables": ["certification_approvals", "remark_approvals", "approval_history", "rnr_approval_actions"],
+            "columns": [],
+            "log_reason": "Bare 'approvals' — 4 different tables, SQL cannot be generated without disambiguation.",
+        },
+        # Goals by/for manager — valid ambiguity: all managers vs specific manager
+        {
+            "patterns": [
+                r"\bgoal(s)?\b.{0,60}\bmanager(s)?\b",
+                r"\bmanager(s)?\b.{0,60}\bgoal(s)?\b",
+                r"\bkra(s)?\b.{0,60}\bmanager(s)?\b",
+            ],
+            "exclude_patterns": [r"\bspecific\s+manager\b", r"\bparticular\s+manager\b"],
+            "roles": ["lead", "manager", "hr", "employee"],
+            "question": "Do you want to view goals assigned by all managers or a specific manager?",
+            "options": ["All Managers", "Specific Manager"],
+            "missing_field": "manager_scope",
+            "tables": ["user_goal_mapping", "user_table"],
+            "columns": ["assigned_by", "reporting_manager"],
+            "log_reason": "Goals+manager — scope ambiguous: all managers vs specific manager.",
+        },
+    ]
+
+    # ── Named-person helpers ──────────────────────────────────────────────────
+
+    def _has_date_context(self, message: str) -> bool:
+        return bool(self._DATE_KEYWORDS_RE.search(message))
+
+    def _is_named_person_query(self, message: str) -> bool:
+        """
+        Return True when a specific person is already named after a relational
+        verb — no clarification about manager/employee scope is needed.
+        "Employees who report to Baskar"  → True  (Baskar is named)
+        "Reporting to all managers"       → False (generic role word)
+        """
+        m = self._NAMED_PERSON_RE.search(message)
+        if not m:
+            return False
+        name_token = m.group(1).lower()
+        return bool(name_token) and name_token not in self._NON_PERSON_WORDS
+
+    def _is_similar_question(self, q1: str, q2: str) -> bool:
+        """Return True if two clarification questions are substantially the same."""
+        _STOPWORDS = frozenset({
+            "a", "an", "the", "do", "you", "want", "to", "or", "and",
+            "is", "for", "of", "in", "that", "this", "with", "all", "see",
+        })
+
+        def _kw(text: str) -> set:
+            return {
+                w for w in re.sub(r"[^\w\s]", "", text.lower()).split()
+                if w not in _STOPWORDS
+            }
+
+        kw1, kw2 = _kw(q1), _kw(q2)
+        if not kw1 or not kw2:
+            return False
+        return len(kw1 & kw2) / min(len(kw1), len(kw2)) >= 0.5
+
+    # ── Schema-grounded response ──────────────────────────────────────────────
+
+    def _schema_grounded_response(
+        self, message: str, user_role: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Check if the query matches a deterministic entity-scope clarification
+        pattern. Returns a direct clarification bypassing the LLM, or None to
+        fall through to the LLM.
+
+        Only covers cases where SQL genuinely cannot be generated without
+        disambiguation (multiple tables / fundamentally ambiguous scope).
+        Single-table queries (feedback, skills, certs, badges, goals) must NOT
+        be in this list — they route to SQL generation directly.
+        """
+        if self._SELF_REFERENCE_RE.search(message):
+            return None
+
+        msg_lower = message.lower()
+        for entry in self._ENTITY_SCOPE_CLARIFICATIONS:
+            if user_role not in entry["roles"]:
+                continue
+            excluded = any(
+                re.search(excl, msg_lower, re.IGNORECASE)
+                for excl in entry.get("exclude_patterns", [])
+            )
+            if excluded:
+                continue
+            for pattern in entry["patterns"]:
+                if re.search(pattern, msg_lower, re.IGNORECASE):
+                    logger.info(
+                        "[intent_agent] schema-grounded clarification | "
+                        "reason=%s tables=%s",
+                        entry.get("log_reason", ""),
+                        entry["tables"],
+                    )
+                    return {
+                        "track": "incomplete",
+                        "confidence": 0.95,
+                        "greeting_message": "",
+                        "off_topic_reason": None,
+                        "polite_block_message": None,
+                        "missing_field": entry["missing_field"],
+                        "follow_up_question": entry["question"],
+                        "follow_up_options": entry["options"],
+                        "enriched_prompt": None,
+                        "extracted_filters": {},
+                        "reasoning": entry.get("log_reason", "Schema-grounded clarification."),
+                    }
+        return None
+
+    # ── classify ─────────────────────────────────────────────────────────────
+
     def classify(
         self,
         user_message: str,
@@ -293,28 +482,51 @@ class IntentDetectorAgent:
         if not user_message.strip():
             return self._empty_message_response(user_role)
 
-        # Bypass LLM for master-data lookup queries — they are always "clear".
+        # ── Shortcut 1: master-data lookup → always clear ─────────────────────
         if self._is_master_data_query(user_message):
-            logger.info(f"[intent_agent] master-data shortcut for: {user_message[:80]}")
+            logger.info("[intent_agent] master-data shortcut: %s", user_message[:80])
             return self._master_data_response(user_message)
 
-        # Bypass LLM for follow-up/continuation messages when conversation history exists.
-        # "Add email", "Filter by dept", "Also show salary" etc. are always refinements.
+        # ── Shortcut 2: follow-up refinement → always clear ───────────────────
         if memory_context and self._is_continuation(user_message):
-            logger.info(f"[intent_agent] continuation shortcut for: {user_message[:80]}")
+            logger.info("[intent_agent] continuation shortcut: %s", user_message[:80])
             return self._continuation_response(user_message)
 
+        # ── Shortcut 3: named person already in query → always clear ──────────
+        if self._is_named_person_query(user_message):
+            logger.info(
+                "[intent_agent] named-person shortcut (specific target stated): %s",
+                user_message[:80],
+            )
+            return {
+                "track": "clear",
+                "confidence": 0.97,
+                "greeting_message": "",
+                "off_topic_reason": None,
+                "polite_block_message": None,
+                "missing_field": None,
+                "follow_up_question": None,
+                "follow_up_options": [],
+                "enriched_prompt": user_message,
+                "extracted_filters": {},
+                "reasoning": "Specific person already named — no scope clarification needed.",
+            }
+
+        # ── Shortcut 4: schema-grounded entity-scope clarification ────────────
+        # Only on round 0, only for genuinely multi-table ambiguous queries.
+        if clarification_round == 0:
+            grounded = self._schema_grounded_response(user_message, user_role)
+            if grounded is not None:
+                return grounded
+
+        # ── LLM classification ────────────────────────────────────────────────
         safe_schema = (schema_summary[:2000] if schema_summary else "KRA goals, ratings, appraisals, employee data")
         safe_schema = safe_schema.replace("{", "{{").replace("}", "}}")
-
         safe_memory = (memory_context[:1500] if memory_context else "No prior conversation.")
         safe_memory = safe_memory.replace("{", "{{").replace("}", "}}")
 
-        # Build schema-driven examples for greeting/off-topic messages
         suggestions = suggestion_builder.get_suggestions(user_role)
         role_examples = "\n".join(f"• {s}" for s in suggestions)
-
-        # Fetch live DB options for every clarification field type
         db_options = clarification_options_builder.get_all_options()
 
         def _fmt(opts: list) -> str:
@@ -343,35 +555,72 @@ class IntentDetectorAgent:
                 HumanMessage(content=f"Classify this message: {user_message}"),
             ])
             raw = response.content.strip()
-            logger.debug(f"[intent_agent] raw: {raw[:400]}")
-            return self._parse(raw, user_message, user_role, clarification_round)
+            logger.debug("[intent_agent] raw LLM: %s", raw[:400])
+            result = self._parse(raw, user_message, user_role, clarification_round)
+
+            # ── Post-LLM: block repeat clarification ──────────────────────────
+            # If the LLM re-asks the exact same question from the previous round,
+            # force track="clear" so the report generates instead of looping.
+            if (
+                result.get("track") == "incomplete"
+                and clarification_round >= 1
+                and prior_followup
+                and result.get("follow_up_question")
+                and self._is_similar_question(result["follow_up_question"], prior_followup)
+            ):
+                logger.info(
+                    "[intent_agent] Blocked repeat clarification — forcing clear. "
+                    "prior=%r re-asked=%r",
+                    prior_followup[:60], result["follow_up_question"][:60],
+                )
+                result["track"] = "clear"
+                result["follow_up_question"] = None
+                result["follow_up_options"] = []
+                result["missing_field"] = None
+                if not result.get("enriched_prompt"):
+                    result["enriched_prompt"] = user_message
+
+            return result
         except Exception as e:
-            logger.error(f"[intent_agent] LLM call failed: {e}")
+            logger.error("[intent_agent] LLM call failed: %s", e)
             return self._fallback(user_message)
 
-    # ---------------------------------------------------------------------- #
-    # Parsing helpers                                                          #
-    # ---------------------------------------------------------------------- #
+    # ── Parsing helpers ───────────────────────────────────────────────────────
 
     def _parse(self, raw: str, original: str, user_role: str, clarification_round: int) -> Dict[str, Any]:
         match = re.search(r"\{[\s\S]*\}", raw)
         if not match:
-            logger.error("[intent_agent] no JSON found in response")
+            logger.error("[intent_agent] no JSON found in LLM response")
             return self._fallback(original)
 
         try:
             data = json.loads(match.group(0))
         except json.JSONDecodeError as exc:
-            logger.error(f"[intent_agent] JSON parse error: {exc}")
+            logger.error("[intent_agent] JSON parse error: %s", exc)
             return self._fallback(original)
 
-        # Hard-enforce the clarification_round >= 2 rule
+        # Hard-enforce clarification_round >= 2 → always clear
         if clarification_round >= 2:
             data["track"] = "clear"
             if not data.get("enriched_prompt"):
                 data["enriched_prompt"] = original
 
         track = data.get("track", "clear")
+        missing_field = data.get("missing_field")
+
+        # ── Guard: block time_period when query has no date/time context ──────
+        # The LLM occasionally violates this rule; this post-processes the output.
+        if track == "incomplete" and missing_field == "time_period":
+            if not self._has_date_context(original):
+                logger.info(
+                    "[intent_agent] Blocked spurious time_period clarification "
+                    "(no date context in %r). Forcing clear.", original[:80],
+                )
+                track = "clear"
+                missing_field = None
+                data["track"] = "clear"
+                if not data.get("enriched_prompt"):
+                    data["enriched_prompt"] = original
 
         # Ensure greeting_message is populated for greeting track
         greeting_message = data.get("greeting_message") or ""
@@ -379,23 +628,31 @@ class IntentDetectorAgent:
             redirect = suggestion_builder.get_greeting_redirect(user_role)
             greeting_message = f"Hello! {redirect[0].upper()}{redirect[1:]}"
 
-        # Ensure polite_block_message is populated for off_topic (no bullet list)
+        # Ensure polite_block_message is populated for off_topic
         polite_block_message = data.get("polite_block_message") or ""
         if track == "off_topic" and not polite_block_message:
             redirect = suggestion_builder.get_off_topic_redirect(user_role)
             polite_block_message = f"I'm only able to help with KRA report building! {redirect}"
 
-        # Always override follow_up_options with live DB data — never trust LLM-generated values.
-        # This prevents hallucinated employee names, fake dates, and invented status values.
-        missing_field = data.get("missing_field")
+        # Override follow_up_options with live DB data for LLM-generated clarifications.
+        # Prevents hallucinated names/values in options.
+        # (Schema-grounded responses bypass _parse() entirely, so their options are kept.)
         if track == "incomplete" and missing_field:
             follow_up_options = clarification_options_builder.get_options(missing_field)
             logger.debug(
-                f"[intent_agent] overriding follow_up_options field={missing_field} "
-                f"count={len(follow_up_options)}"
+                "[intent_agent] overriding follow_up_options field=%s count=%d",
+                missing_field, len(follow_up_options),
             )
         else:
             follow_up_options = data.get("follow_up_options") or []
+
+        logger.info(
+            "[intent_agent] classified | track=%s missing_field=%s "
+            "confidence=%.2f reasoning=%s",
+            track, missing_field,
+            float(data.get("confidence", 0.8)),
+            data.get("reasoning", "")[:100],
+        )
 
         return {
             "track": track,
@@ -412,7 +669,6 @@ class IntentDetectorAgent:
         }
 
     def _fallback(self, original: str) -> Dict[str, Any]:
-        """Used when the LLM returns unparseable output — always proceed to clear."""
         return {
             "track": "clear",
             "confidence": 0.5,
