@@ -325,14 +325,23 @@ class IntentDetectorAgent:
     )
 
     # ── Named-person detection ────────────────────────────────────────────────
-    # "report to Baskar", "managed by Sarah" → specific person already named → clear.
+    # Detects when a specific person is already named in the query so that
+    # no scope / employee clarification is needed → always route to clear.
+    #
+    # Pattern A: relational verbs  → "report to Baskar", "managed by Sarah"
+    # Pattern B: KRA/report "for"  → "KRA report for Baskar", "goals for VT136"
     _NAMED_PERSON_RE = re.compile(
         r"\b(?:"
+        # Relational-verb patterns
         r"report(?:ing|s)?\s+to|directly\s+report(?:ing|s)?\s+to|"
         r"under\s+(?:the\s+)?(?:management\s+of\s+)?|"
         r"managed\s+by|assigned\s+by|subordinates?\s+of|"
-        r"reportees?\s+of|team\s+of"
-        r")\s+(\w+)",
+        r"reportees?\s+of|team\s+of|"
+        # KRA/report "for [name]" patterns
+        r"(?:kra|goal|report|feedback|skill|certifi(?:cate|cation)|badge|"
+        r"compliance|performance|appraisal|productivity)\s+(?:\w+\s+){0,3}for\s+|"
+        r"for\s+employee\s+"
+        r")\s*(\w+)",
         re.IGNORECASE,
     )
     _NON_PERSON_WORDS: frozenset = frozenset({
@@ -340,7 +349,16 @@ class IntentDetectorAgent:
         "manager", "managers", "lead", "leads", "employee", "employees",
         "him", "her", "them", "everyone", "anyone", "someone", "nobody",
         "senior", "junior", "team", "group", "department", "every", "each",
-        "other", "another", "certain", "given",
+        "other", "another", "certain", "given", "past", "last", "this",
+        "current", "previous", "next", "recent", "whole", "full", "entire",
+    })
+    # Date/time words that must not be matched as person names
+    _DATE_WORDS: frozenset = frozenset({
+        "q1", "q2", "q3", "q4", "january", "february", "march", "april",
+        "may", "june", "july", "august", "september", "october", "november",
+        "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
+        "sept", "oct", "nov", "dec", "year", "month", "week", "quarter",
+        "today", "yesterday", "annual", "fiscal", "period",
     })
 
     # ── Schema-grounded entity-scope clarification patterns ───────────────────
@@ -388,16 +406,28 @@ class IntentDetectorAgent:
 
     def _is_named_person_query(self, message: str) -> bool:
         """
-        Return True when a specific person is already named after a relational
-        verb — no clarification about manager/employee scope is needed.
-        "Employees who report to Baskar"  → True  (Baskar is named)
-        "Reporting to all managers"       → False (generic role word)
+        Return True when a specific person (or employee ID) is already named in
+        the query, meaning no scope clarification is needed.
+
+        Matches:
+          "Employees who report to Baskar"          → True
+          "KRA report for Baskar Kothandapany"      → True
+          "Goals for VT136"                         → True  (employee ID)
+          "Show goals for all managers"             → False ("all" is non-person)
+          "KRA report for Q1 2025"                  → False ("Q1" is a date word)
         """
         m = self._NAMED_PERSON_RE.search(message)
         if not m:
             return False
-        name_token = m.group(1).lower()
-        return bool(name_token) and name_token not in self._NON_PERSON_WORDS
+        token = m.group(1).lower()
+        if not token or len(token) < 2:
+            return False
+        if token in self._NON_PERSON_WORDS:
+            return False
+        if token in self._DATE_WORDS:
+            return False
+        # Employee IDs often start with digits; those are also valid identifiers
+        return True
 
     def _is_similar_question(self, q1: str, q2: str) -> bool:
         """Return True if two clarification questions are substantially the same."""
