@@ -9,12 +9,16 @@ function _isContinuation(query) {
   return _CONTINUATION_RE.test(query)
 }
 
-// Build an enriched query that merges the last user request with the new follow-up
+// Build an enriched query that accumulates context across multiple follow-ups.
+// Uses the last user message's apiQuery (full enriched query) as the base,
+// so multi-turn follow-ups build on the complete accumulated context, not just
+// the most recent short display message.
 function _enrichFollowUp(query, chatHistory) {
   const lastUser = [...chatHistory].reverse().find((m) => m.role === 'user' && m.type === 'message')
   if (!lastUser) return query
-  // "List employee names. Also: Add employee mail id"
-  return `${lastUser.content}. Also: ${query}`
+  // Prefer apiQuery (full accumulated context) over content (short display text)
+  const base = lastUser.apiQuery || lastUser.content
+  return `${base}. Also: ${query}`
 }
 
 const INITIAL_REPORT = {
@@ -93,8 +97,9 @@ const useStore = create(
           pendingThinkingId: thinkingId,
           chatHistory: [
             ...chatHistory,
-            // Display the short original text in the chat bubble
-            { id: _uuid(), role: 'user', type: 'message', content: query, ts: _now() },
+            // content = short display text shown in the bubble
+            // apiQuery = full enriched query sent to backend (used as base for next follow-up)
+            { id: _uuid(), role: 'user', type: 'message', content: query, apiQuery: apiQuery, ts: _now() },
             { id: thinkingId, role: 'assistant', type: 'thinking', ts: _now() },
           ],
         })

@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.agents.intent_agent import intent_agent
 from app.agents.llm_agent import llm_agent
-from app.agents.prompt_builder import prompt_builder
+from app.agents.prompt_builder import prompt_builder, extract_column_hint
 from app.agents.sql_agent import sql_refinement_agent
 from app.cache.query_cache import QueryCache
 from app.cache.redis_cache import sql_cache
@@ -216,7 +216,9 @@ def sql_validator_node(state: AgentState) -> Dict[str, Any]:
     sql = state.get("refined_sql", "")
     user_id = state["user_id"]
 
-    status, message, validated_sql = sql_validator.validate(sql, user_id)
+    status, message, validated_sql = sql_validator.validate(
+        sql, user_id, user_query=state.get("user_query", "")
+    )
 
     step = {
         "node": "sql_validator",
@@ -240,11 +242,13 @@ def sql_validator_node(state: AgentState) -> Dict[str, Any]:
 
 def increment_retry_validation_node(state: AgentState) -> Dict[str, Any]:
     new_count = state.get("retry_count", 0) + 1
+    msg = state.get('validation_message', '')
+    hint = extract_column_hint(msg)
     feedback = (
-        f"SQL validation failed: {state.get('validation_message', '')}\n"
+        f"SQL validation failed: {msg}{hint}\n"
         f"Rejected SQL was:\n{state.get('refined_sql', '')}"
     )
-    logger.warning(f"[retry_validation] user={state['user_id']} attempt={new_count} reason={state.get('validation_message')}")
+    logger.warning(f"[retry_validation] user={state['user_id']} attempt={new_count} reason={msg}")
     return {"retry_count": new_count, "retry_feedback": feedback}
 
 
@@ -255,8 +259,9 @@ def increment_retry_validation_node(state: AgentState) -> Dict[str, Any]:
 def increment_retry_execution_node(state: AgentState) -> Dict[str, Any]:
     new_count = state.get("retry_count", 0) + 1
     exec_error = state.get("execution_result", {}).get("error", "Unknown error")
+    hint = extract_column_hint(str(exec_error))
     feedback = (
-        f"SQL execution failed with: {exec_error}\n"
+        f"SQL execution failed with: {exec_error}{hint}\n"
         f"Failed SQL was:\n{state.get('refined_sql', '')}"
     )
     logger.warning(f"[retry_execution] user={state['user_id']} attempt={new_count} error={exec_error}")
@@ -526,16 +531,11 @@ def intent_detector_node(state: AgentState) -> Dict[str, Any]:
     t0 = time.time()
     user_query = state.get("user_query", "")
     user_role = state.get("user_role", "employee")
-    clarification_round = state.get("clarification_round", 0)
-    prior_followup = state.get("prior_followup", "")
-    schema_str = state.get("schema", "")
 
     result = intent_agent.classify(
         user_message=user_query,
         user_role=user_role,
-        clarification_round=clarification_round,
-        prior_followup=prior_followup,
-        schema_summary=schema_str,
+        schema_summary=state.get("schema", ""),
         memory_context=state.get("memory_context", ""),
     )
 
@@ -549,7 +549,7 @@ def intent_detector_node(state: AgentState) -> Dict[str, Any]:
     }
     logger.info(
         f"[intent_detector] user={state['user_id']} track={result['track']} "
-        f"round={clarification_round} confidence={result['confidence']:.2f}"
+        f"confidence={result['confidence']:.2f}"
     )
     return {
         "intent_track": result["track"],
@@ -558,8 +558,6 @@ def intent_detector_node(state: AgentState) -> Dict[str, Any]:
         "greeting_message": result.get("greeting_message") or "",
         "off_topic_reason": result.get("off_topic_reason") or "",
         "off_topic_message": result.get("polite_block_message") or "",
-        "follow_up_question": result.get("follow_up_question") or "",
-        "follow_up_options": result.get("follow_up_options") or [],
         "enriched_prompt": result.get("enriched_prompt") or "",
         "extracted_filters": result.get("extracted_filters") or {},
         "steps": _steps(state) + [step],
@@ -605,33 +603,6 @@ def off_topic_node(state: AgentState) -> Dict[str, Any]:
         "duration_ms": round((time.time() - t0) * 1000, 1),
     }
     logger.info(f"[off_topic] user={state['user_id']} reason={state.get('off_topic_reason')}")
-    return {"formatted_result": formatted, "steps": _steps(state) + [step]}
-
-
-# ─────────────────────────────────────────────
-# Node: Clarification Handler (NEW — Track B)
-# ─────────────────────────────────────────────
-
-def clarification_node(state: AgentState) -> Dict[str, Any]:
-    t0 = time.time()
-    formatted = {
-        "status": "clarification_needed",
-        "follow_up_question": state.get("follow_up_question", ""),
-        "follow_up_options": state.get("follow_up_options", []),
-        "clarification_round": state.get("clarification_round", 0),
-        "original_prompt": state.get("user_query", ""),
-        "missing_field": state.get("intent_reasoning", ""),
-    }
-    step = {
-        "node": "clarification",
-        "status": "success",
-        "round": state.get("clarification_round", 0),
-        "duration_ms": round((time.time() - t0) * 1000, 1),
-    }
-    logger.info(
-        f"[clarification] user={state['user_id']} round={state.get('clarification_round', 0)} "
-        f"question={state.get('follow_up_question', '')[:60]}"
-    )
     return {"formatted_result": formatted, "steps": _steps(state) + [step]}
 
 
@@ -685,9 +656,10 @@ def sql_test_node(state: AgentState) -> Dict[str, Any]:
 def increment_retry_test_node(state: AgentState) -> Dict[str, Any]:
     new_count = state.get("retry_count", 0) + 1
     error     = state.get("test_execution_error", "Unknown test error")
+    hint      = extract_column_hint(str(error))
     feedback  = (
-        f"SQL dry-run (LIMIT 0) failed with error:\n{error}\n\n"
-        f"Fix ONLY using table and column names defined in the schema above.\n"
+        f"SQL dry-run (LIMIT 0) failed with error:\n{error}{hint}\n\n"
+        f"Fix using EXACT table and column names from the DATABASE SCHEMA above.\n"
         f"Failed SQL:\n{state.get('refined_sql', '')}"
     )
     logger.warning(
@@ -739,8 +711,6 @@ def route_after_intent_detection(state: AgentState) -> str:
         return "greeting"
     if track == "off_topic":
         return "off_topic"
-    if track == "incomplete":
-        return "clarification"
     return "prompt_builder"
 
 
