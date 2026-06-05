@@ -52,6 +52,12 @@ _WRONG_DATE_DIR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LIST_INTENT_RE = re.compile(
+    r"\b(list|show|display|give me|what are|fetch|get)\b.{0,60}\b(goal|kra|target|task)",
+    re.IGNORECASE,
+)
+_AGGREGATE_RE = re.compile(r"\bGROUP\s+BY\b", re.IGNORECASE)
+
 _SELECT_RE      = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
 _JOIN_RE        = re.compile(r"\bJOIN\b", re.IGNORECASE)
 _ON_RE          = re.compile(r"\bON\b", re.IGNORECASE)
@@ -120,6 +126,28 @@ class SQLValidator:
                     "The user asked for 'last/past N months' which means goals WITHIN the recent period. "
                     "Use >= not <: AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N MONTH). "
                     "Use < only when user says 'older than N months' or 'more than N months ago'."
+                ),
+                sql,
+            )
+
+        # ── List intent should not produce GROUP BY aggregates ────────────────
+        if user_query and _LIST_INTENT_RE.search(user_query) and _AGGREGATE_RE.search(sql):
+            logger.warning("[sql_validator] list-intent query generated GROUP BY, user=%s", user_id)
+            return (
+                ValidationStatus.INVALID,
+                (
+                    "The user asked to LIST goals — return individual rows, not aggregates. "
+                    "Remove GROUP BY and COUNT. Use the KRA goal list pattern:\n"
+                    "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, "
+                    "d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, "
+                    "s.status_name AS goal_status, ugm.target_date, ugm.assigned_date "
+                    "FROM user_goal_mapping ugm "
+                    "JOIN user_table u ON ugm.employee_id = u.employee_id "
+                    "JOIN designation d ON u.designation_id = d.designation_id "
+                    "JOIN master_goals mg ON ugm.goal_id = mg.goal_id "
+                    "LEFT JOIN status s ON ugm.status_id = s.id "
+                    "WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 "
+                    "-- add name filter: AND u.firstname LIKE '%Name%'"
                 ),
                 sql,
             )
