@@ -58,7 +58,13 @@ PERIOD / MONTH TERMS:
 4. Use explicit JOIN ... ON conditions — no implicit/cartesian joins
 5. Prefer table aliases for readability
 6. Use DATE_FORMAT, YEAR(), MONTH() for date filtering when needed
-7. Aggregate data meaningfully (GROUP BY, COUNT, SUM, AVG)
+7. AGGREGATION vs DETAIL — choose based on user intent:
+   - "list" / "show" / "give me" / "what are" / "display" → individual rows, NO GROUP BY, NO COUNT
+     Example: "list the goals for Baskar" → one row per goal with goal_desc, status, target_date
+   - "count" / "how many" / "total" / "summary" / "overview" / "how much" → aggregate with COUNT/GROUP BY
+     Example: "how many goals does Baskar have" → COUNT(ugm.id) GROUP BY employee
+   - "categorized by" / "grouped by" / "wise" → aggregate summary with GROUP BY
+   NEVER apply GROUP BY or COUNT when the user says "list", "show", or "display".
 8. Column names must exactly match the schema above
 9. NEVER hardcode an employee ID. When filtering by the logged-in user,
    use the named parameter :employee_id (e.g. WHERE employee_id = :employee_id).
@@ -172,7 +178,8 @@ PERIOD / MONTH TERMS:
     Rule 11d (don't hardcode status values) does NOT apply to 'Completed' — it is the standard
     completion status and must always be used when the user asks about completion.
 
-    a) KRA / GOAL STATUS REPORT:
+    a) KRA / GOAL LIST (use when user says "list goals", "show goals", "what are the goals"):
+       -- Returns ONE ROW PER GOAL — NO GROUP BY, NO COUNT
        SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
               d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
               s.status_name AS goal_status, ugm.target_date, ugm.assigned_date
