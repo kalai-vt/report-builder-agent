@@ -39,6 +39,19 @@ _HARDCODED_EMP_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GOAL_HISTORY_RE = re.compile(r"\bgoal_history\b", re.IGNORECASE)
+
+# Detects "last/past/recent N months/years" in user query
+_RECENT_PERIOD_RE = re.compile(
+    r"\b(last|past|recent|within)\s+\d+\s*(month|year|week)s?\b",
+    re.IGNORECASE,
+)
+# Detects wrong date direction: < DATE_SUB(CURDATE(), INTERVAL ...
+_WRONG_DATE_DIR_RE = re.compile(
+    r"(?:target_date|assigned_date|modified_date)\s*<\s*DATE_SUB\s*\(\s*CURDATE\s*\(\s*\)",
+    re.IGNORECASE,
+)
+
 _SELECT_RE      = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
 _JOIN_RE        = re.compile(r"\bJOIN\b", re.IGNORECASE)
 _ON_RE          = re.compile(r"\bON\b", re.IGNORECASE)
@@ -71,6 +84,45 @@ class SQLValidator:
 
         if not _SELECT_RE.match(sql):
             return ValidationStatus.UNSAFE, "Only SELECT statements are permitted", sql
+
+        # ── goal_history must never be used in KRA / goal status reports ─────
+        if _GOAL_HISTORY_RE.search(sql):
+            logger.warning("[sql_validator] goal_history used in SQL — rejecting, user=%s", user_id)
+            return (
+                ValidationStatus.INVALID,
+                (
+                    "goal_history must NOT be used for KRA or goal status reports — not in EXISTS, "
+                    "JOIN, or subqueries. It only tracks historical date changes. "
+                    "Rewrite the query using user_goal_mapping as the primary table:\n"
+                    "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, "
+                    "d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, "
+                    "s.status_name AS goal_status, ugm.target_date, ugm.assigned_date "
+                    "FROM user_goal_mapping ugm "
+                    "JOIN user_table u ON ugm.employee_id = u.employee_id "
+                    "JOIN designation d ON u.designation_id = d.designation_id "
+                    "JOIN master_goals mg ON ugm.goal_id = mg.goal_id "
+                    "LEFT JOIN status s ON ugm.status_id = s.id "
+                    "WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 "
+                    "-- 'last N months' date filter: AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N MONTH) "
+                    "-- 'not completed' status filter: AND s.status_name != 'Completed' "
+                    "-- name filter: AND u.firstname LIKE '%Name%'"
+                ),
+                sql,
+            )
+
+        # ── Wrong date direction for "last/past N months/years" queries ──────────
+        if user_query and _RECENT_PERIOD_RE.search(user_query) and _WRONG_DATE_DIR_RE.search(sql):
+            logger.warning("[sql_validator] wrong date direction for recent-period query, user=%s", user_id)
+            return (
+                ValidationStatus.INVALID,
+                (
+                    "Wrong date filter direction. "
+                    "The user asked for 'last/past N months' which means goals WITHIN the recent period. "
+                    "Use >= not <: AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N MONTH). "
+                    "Use < only when user says 'older than N months' or 'more than N months ago'."
+                ),
+                sql,
+            )
 
         sql = self._strip_limit_offset(sql)
 

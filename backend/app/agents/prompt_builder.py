@@ -13,6 +13,41 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
 {schema}
 
 ════════════════════════════════════════
+ BUSINESS TERMINOLOGY — translate these terms before generating SQL
+════════════════════════════════════════
+KRA COMPLIANCE TERMS:
+  "non-compliance" / "non-compliant" / "not compliant"
+      → goals NOT completed: s.status_name != 'Completed'
+  "compliance" / "compliant" / "compliance report"
+      → goals completed: s.status_name = 'Completed'
+  "pending goals" / "incomplete goals" / "unfinished goals"
+      → s.status_name != 'Completed'
+  "overdue goals" / "missed targets"
+      → ugm.target_date < CURDATE() AND s.status_name != 'Completed'
+
+GROUPING / CATEGORIZATION TERMS (these require GROUP BY in SQL):
+  "department-wise" / "by department" / "categorized by department"
+      → GROUP BY u.stream ORDER BY department  (u.stream IS the department column)
+  "stream-wise" / "by stream" / "stream-based"
+      → GROUP BY u.stream
+  "designation-wise" / "by designation" / "role-wise"
+      → GROUP BY d.designation_name
+  "team-wise" / "by team"
+      → GROUP BY u.stream
+  When "wise" / "categorized" / "grouped" is used with a dimension,
+  include both a COUNT and the dimension column in SELECT.
+
+PERIOD / MONTH TERMS:
+  "April 2026"    → YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
+  "March 2026"    → YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 3
+  "Q1 2026"       → YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) IN (1,2,3)
+  "Q2 2026"       → YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) IN (4,5,6)
+  "Q3 2026"       → YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) IN (7,8,9)
+  "Q4 2026"       → YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) IN (10,11,12)
+  Month name → number: Jan=1, Feb=2, Mar=3, Apr=4, May=5, Jun=6,
+                        Jul=7, Aug=8, Sep=9, Oct=10, Nov=11, Dec=12
+
+════════════════════════════════════════
  SQL GENERATION RULES
 ════════════════════════════════════════
 1. Generate ONLY valid MySQL SELECT statements
@@ -106,7 +141,36 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
 
 14. QUERY PATTERNS — follow these JOIN chains for every common report type.
     NEVER use goal_history for current goal reports — use user_goal_mapping.
+    NEVER use EXISTS (SELECT 1 FROM goal_history ...) as a filter in any KRA or goal report.
+    The date range filter for KRA reports must be applied on ugm.target_date in user_goal_mapping — NOT on goal_history.
     Always apply every recommended filter shown in the schema.
+
+    DATE RANGE SEMANTICS — critical: apply the correct operator based on user intent.
+    "in the last N months" means the RECENT period — goals whose target_date falls WITHIN the past N months.
+    This ALWAYS uses >= (greater than or equal), never <.
+
+    CORRECT MAPPING (memorize these exactly):
+    ┌─────────────────────────────────────────────┬────────────────────────────────────────────────────────┐
+    │ User says                                   │ SQL filter                                             │
+    ├─────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
+    │ "last 6 months" / "past 6 months"           │ ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)│
+    │ "last 1 year"   / "past 1 year"             │ ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) │
+    │ "last 3 months"                             │ ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)│
+    │ "older than 6 months" / "more than 6 months ago" │ ugm.target_date < DATE_SUB(CURDATE(), INTERVAL 6 MONTH) │
+    │ "overdue" (missed deadline)                 │ ugm.target_date < CURDATE() AND s.status_name != 'Completed' │
+    └─────────────────────────────────────────────┴────────────────────────────────────────────────────────┘
+    RULE: "last N months" → >= DATE_SUB(CURDATE(), INTERVAL N MONTH)   ← ALWAYS >=, NEVER <
+    RULE: "older than N months" → < DATE_SUB(CURDATE(), INTERVAL N MONTH)   ← ALWAYS <
+
+    COMPLETION STATUS FILTER — use s.status_name for filtering goal completion:
+    - "not completed" / "incomplete" / "pending" / "in progress"
+        → AND s.status_name != 'Completed'
+    - "completed" / "done" / "finished"
+        → AND s.status_name = 'Completed'
+    - "overdue and not completed"
+        → AND ugm.target_date < CURDATE() AND s.status_name != 'Completed'
+    Rule 11d (don't hardcode status values) does NOT apply to 'Completed' — it is the standard
+    completion status and must always be used when the user asks about completion.
 
     a) KRA / GOAL STATUS REPORT:
        SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
@@ -118,8 +182,9 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
        JOIN master_goals mg ON ugm.goal_id = mg.goal_id
        LEFT JOIN status s   ON ugm.status_id = s.id
        WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
-       -- Date filter : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
-       -- Name filter : AND u.firstname LIKE '%Baskar%' AND u.lastname LIKE '%Kothandapany%'
+       -- "last N months" date filter  : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N MONTH)
+       -- "not completed" status filter: AND s.status_name != 'Completed'
+       -- Name filter                  : AND u.firstname LIKE '%Baskar%'
 
     b) EMPLOYEE LIST / MASTER DATA:
        SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
@@ -171,6 +236,51 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
        FROM user_table u
        JOIN designation d ON u.designation_id = d.designation_id
        WHERE u.reporting_manager = :employee_id AND u.is_active=1 AND u.is_delete=0 AND d.is_active=1
+
+    j) NON-COMPLIANCE REPORT (goals not completed, department-wise summary):
+       SELECT u.stream AS department,
+              COUNT(DISTINCT ugm.employee_id) AS non_compliant_employees,
+              COUNT(ugm.id) AS incomplete_goals
+       FROM user_goal_mapping ugm
+       JOIN user_table u    ON ugm.employee_id = u.employee_id
+       JOIN designation d   ON u.designation_id = d.designation_id
+       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s   ON ugm.status_id = s.id
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+         AND s.status_name != 'Completed'
+       -- Month/period filter: AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
+       GROUP BY u.stream
+       ORDER BY non_compliant_employees DESC
+
+    k) NON-COMPLIANCE DETAILED LIST (employee-level, with department column):
+       SELECT u.stream AS department,
+              CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, mg.goal_desc AS goal_name,
+              s.status_name AS goal_status, ugm.target_date
+       FROM user_goal_mapping ugm
+       JOIN user_table u    ON ugm.employee_id = u.employee_id
+       JOIN designation d   ON u.designation_id = d.designation_id
+       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s   ON ugm.status_id = s.id
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+         AND s.status_name != 'Completed'
+       -- Month/period filter: AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
+       ORDER BY u.stream, u.firstname
+
+    l) COMPLIANCE REPORT (goals completed, department-wise summary):
+       SELECT u.stream AS department,
+              COUNT(DISTINCT ugm.employee_id) AS compliant_employees,
+              COUNT(ugm.id) AS completed_goals
+       FROM user_goal_mapping ugm
+       JOIN user_table u    ON ugm.employee_id = u.employee_id
+       JOIN designation d   ON u.designation_id = d.designation_id
+       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s   ON ugm.status_id = s.id
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+         AND s.status_name = 'Completed'
+       -- Month/period filter: AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
+       GROUP BY u.stream
+       ORDER BY compliant_employees DESC
 
     i) RNR NOMINATIONS:
        SELECT CONCAT(TRIM(n.firstname),' ',TRIM(n.lastname),' (',n.employee_id,')') AS nominee,

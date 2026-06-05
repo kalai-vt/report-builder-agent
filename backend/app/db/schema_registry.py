@@ -29,6 +29,8 @@ _DOMAIN_KEYWORDS: Dict[str, List[str]] = {
     "goals_kra":             ["goal", "kra", "objective", "target", "performance",
                               "rating", "remark", "status", "assigned", "progress",
                               "completion", "overdue", "weightage", "productive"],
+    "goal_audit":            ["goal date change", "target date history", "goal modification history",
+                              "audit trail", "goal date audit"],
     "feedback":              ["feedback", "review", "comment", "likes"],
     "skills_certifications": ["skill", "certificate", "certification", "proficiency",
                               "course", "platform", "experience"],
@@ -55,7 +57,7 @@ _TABLE_COMPANIONS: Dict[str, List[str]] = {
     "rnr_approval_actions":  ["rnr_nominations", "user_table"],
     "user_feedback":         ["user_table"],
     "recommendations":       ["user_table"],
-    "goal_history":          ["user_goal_mapping", "master_goals", "user_table"],
+    "goal_history":          ["user_table"],
     "tag_category":          ["tags", "designation", "master_categories"],
 }
 
@@ -322,6 +324,8 @@ class SchemaRegistry:
             lines.append(f"Table: {name}")
             if info.description:
                 lines.append(f"  Purpose: {info.description}")
+            if info.llm_usage_hint:
+                lines.append(f"  Usage: {info.llm_usage_hint}")
             if info.recommended_filters:
                 lines.append(f"  Auto-filters: {', '.join(info.recommended_filters)}")
             lines.append("  Columns:")

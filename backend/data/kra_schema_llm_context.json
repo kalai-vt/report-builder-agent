@@ -37,11 +37,13 @@
     "goals_kra": [
       "user_goal_mapping",
       "master_goals",
-      "goal_history",
       "status",
       "remarks_table",
       "remarks_threads",
       "disagree_remarks_master"
+    ],
+    "goal_audit": [
+      "goal_history"
     ],
     "feedback": [
       "user_feedback",
@@ -1018,7 +1020,7 @@
         }
       ],
       "recommended_filters": [],
-      "llm_usage_hint": "Tracks HISTORICAL CHANGES to goal dates only - NOT current goal state. Do NOT use this for KRA reports or goal status reports. Only use when the user explicitly asks about date change history or audit trail of goal modifications."
+      "llm_usage_hint": "⛔ FORBIDDEN for KRA/goal status reports. Tracks historical date changes only — NOT current goal state. NEVER use goal_history in EXISTS, subqueries, or JOINs when generating a KRA report or goal status report. Use user_goal_mapping instead. Only use goal_history when the user explicitly asks: 'show goal date change history' or 'audit trail of goal modifications'."
     },
     {
       "table_name": "goal_tag_category",
@@ -2459,7 +2461,7 @@
         "user_goal_mapping.isDelete = 0",
         "user_goal_mapping.isactive = 1"
       ],
-      "llm_usage_hint": "PRIMARY table for ALL KRA/goal reports. Use this - NOT goal_history - for current active goals. ALWAYS apply: isDelete = 0 AND isactive = 1. Standard KRA report JOIN chain: FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id. Date filter for past N years: ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N YEAR). DO NOT use goal_history for current goal reports."
+      "llm_usage_hint": "⚠ PRIMARY AND ONLY table for ALL KRA/goal reports. NEVER use goal_history for this purpose — not even in EXISTS or subqueries. ALWAYS apply: isDelete = 0 AND isactive = 1 AND u.is_active = 1 AND u.is_delete = 0 AND d.is_active = 1. Full KRA report SELECT: SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1. Date filter for past N years/months: AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N YEAR). Employee name filter: AND u.firstname LIKE '%Name%'. DO NOT use goal_history anywhere in KRA or goal status queries — not in JOIN, EXISTS, or subquery."
     },
     {
       "table_name": "user_goal_mapping_backup_pre_migration",
