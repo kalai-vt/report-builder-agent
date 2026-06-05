@@ -1,4 +1,5 @@
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,19 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
     e) Auto-apply recommended filters shown in the schema above (e.g. is_delete=0,
        is_active=1) whenever the relevant table is queried.
 
-12. EMPLOYEE NAME SEARCH — use LIKE on separate name columns, NEVER on CONCAT:
+12. COLUMN NAME ACCURACY — always use the EXACT column name shown in the DATABASE SCHEMA above.
+    This database uses non-standard names that differ from common conventions:
+    - Employee email      → u.e_mail            (NOT u.email, NOT u.email_id, NOT u.email_address)
+    - First name          → u.firstname          (NOT u.first_name)
+    - Last name           → u.lastname           (NOT u.last_name)
+    - Manager reference   → u.reporting_manager  (NOT u.manager_id, NOT u.manager, NOT u.manager_employee_id)
+      • reporting_manager stores the manager's employee_id as a VARCHAR.
+      • To join to the manager's record: LEFT JOIN user_table m ON u.reporting_manager = m.employee_id
+    - Soft-delete flag    → u.is_delete          (NOT u.is_deleted, NOT u.deleted)
+    If a column name you want is NOT listed in the schema, do NOT guess or invent a name.
+    Look it up in the schema above and use the exact name shown there.
+
+13. EMPLOYEE NAME SEARCH — use LIKE on separate name columns, NEVER on CONCAT:
     Schema columns: user_table.firstname, user_table.lastname, user_table.employee_id
 
     a) Single name provided (one word — likely a first name):
@@ -91,6 +104,85 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
     h) Employee display always uses:
        CONCAT(TRIM(u.firstname), ' ', TRIM(u.lastname), ' (', u.employee_id, ')') AS employee
 
+14. QUERY PATTERNS — follow these JOIN chains for every common report type.
+    NEVER use goal_history for current goal reports — use user_goal_mapping.
+    Always apply every recommended filter shown in the schema.
+
+    a) KRA / GOAL STATUS REPORT:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+              s.status_name AS goal_status, ugm.target_date, ugm.assigned_date
+       FROM user_goal_mapping ugm
+       JOIN user_table u    ON ugm.employee_id = u.employee_id
+       JOIN designation d   ON u.designation_id = d.designation_id
+       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s   ON ugm.status_id = s.id
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+       -- Date filter : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
+       -- Name filter : AND u.firstname LIKE '%Baskar%' AND u.lastname LIKE '%Kothandapany%'
+
+    b) EMPLOYEE LIST / MASTER DATA:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, u.e_mail, u.stream, u.role
+       FROM user_table u
+       JOIN designation d ON u.designation_id = d.designation_id
+       WHERE u.is_active=1 AND u.is_delete=0 AND d.is_active=1
+
+    c) PERFORMANCE RATING / APPRAISAL REMARKS:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              mg.goal_desc AS goal, rt.performance_rating, rt.remarks, rt.remark_year, rt.remark_month
+       FROM remarks_table rt
+       JOIN user_table u    ON rt.user_id = u.employee_id
+       JOIN master_goals mg ON rt.goal_id = mg.goal_id
+       WHERE u.is_active=1 AND u.is_delete=0
+
+    d) SKILLS:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              sk.skill_name, sk.proficiency_level, sk.months_of_experience, sk.status
+       FROM skills sk
+       JOIN user_table u ON sk.employee_id = u.employee_id
+       WHERE sk.is_deleted=0 AND u.is_active=1 AND u.is_delete=0
+
+    e) CERTIFICATIONS:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              c.certificate_name, c.course, c.platform, c.status, c.issued_at, c.expected_completion_date
+       FROM certificates c
+       JOIN user_table u ON c.employee_id = u.employee_id
+       WHERE c.is_deleted=0 AND u.is_active=1 AND u.is_delete=0
+
+    f) BADGES:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              bm.badge_name, bm.badge_description, ub.status, ub.created_at AS awarded_date
+       FROM user_badges ub
+       JOIN user_table u    ON ub.employee_id = u.employee_id
+       JOIN badge_master bm ON ub.badge_master_id = bm.badge_master_id
+       WHERE ub.is_deleted=0 AND bm.is_deleted=0 AND u.is_active=1 AND u.is_delete=0
+
+    g) FEEDBACK:
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              uf.feedback_desc, uf.feedback_date, uf.feedback_year, uf.likes
+       FROM user_feedback uf
+       JOIN user_table u ON uf.employee_id = u.employee_id
+       WHERE uf.isactive=1 AND u.is_active=1 AND u.is_delete=0
+
+    h) MANAGER TEAM / REPORTEES (logged-in manager):
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, u.stream, u.e_mail
+       FROM user_table u
+       JOIN designation d ON u.designation_id = d.designation_id
+       WHERE u.reporting_manager = :employee_id AND u.is_active=1 AND u.is_delete=0 AND d.is_active=1
+
+    i) RNR NOMINATIONS:
+       SELECT CONCAT(TRIM(n.firstname),' ',TRIM(n.lastname),' (',n.employee_id,')') AS nominee,
+              CONCAT(TRIM(nr.firstname),' ',TRIM(nr.lastname)) AS nominated_by,
+              cat.category_name, rc.cycle_name, rn.current_status, rn.nomination_date
+       FROM rnr_nominations rn
+       JOIN user_table n        ON rn.nominee_employee_id = n.employee_id
+       JOIN user_table nr       ON rn.nominated_by_employee_id = nr.employee_id
+       JOIN rnr_categories cat  ON rn.category_id = cat.category_id
+       JOIN rnr_cycles rc       ON rn.cycle_id = rc.cycle_id
+       WHERE rc.is_deleted=0 AND cat.is_delete=0 AND cat.is_active=1
+
 ════════════════════════════════════════
  CONVERSATION CONTEXT
 ════════════════════════════════════════
@@ -107,15 +199,49 @@ Your job is to generate safe, precise SQL SELECT queries from natural language.
 }}
 """
 
-RETRY_SUFFIX_TEMPLATE = """\
+FOLLOWUP_INSTRUCTION = """
+════════════════════════════════════════
+ FOLLOW-UP MODIFICATION (READ CAREFULLY)
+════════════════════════════════════════
+The user is MODIFYING a previous report.
+Find the most recent "[SQL used: ...]" line in the CONVERSATION CONTEXT above — that is your BASE query.
 
+Rules:
+  1. KEEP all existing SELECT columns from the base SQL unchanged.
+  2. ADD / REMOVE / CHANGE only what the user explicitly asked for.
+  3. Do NOT rewrite the query from scratch — start from the base SQL.
+  4. Use EXACT column names from the DATABASE SCHEMA above (Rule 12).
+     For email: use u.e_mail — NOT u.email.
+"""
+
+RETRY_SUFFIX_TEMPLATE = """
 ════════════════════════════════════════
  PREVIOUS ATTEMPT FAILED — FIX REQUIRED
 ════════════════════════════════════════
 {retry_feedback}
 
-Generate a corrected SQL query addressing the above issue.
+Fix ONLY the specific error above. Use EXACT column and table names from the DATABASE SCHEMA section.
+If the error says "Unknown column 'X'", find the correct name for X in the schema (e.g. email → e_mail).
+Do NOT drop columns — correct their names.
 """
+
+# Detects "Unknown column 'tbl.col'" in MySQL error messages
+_UNKNOWN_COLUMN_RE = re.compile(r"Unknown column '([^']+)'", re.IGNORECASE)
+
+
+def extract_column_hint(error: str) -> str:
+    """Return a targeted hint when the error is a missing-column error."""
+    m = _UNKNOWN_COLUMN_RE.search(error)
+    if not m:
+        return ""
+    bad_ref = m.group(1)
+    bad_col = bad_ref.split(".")[-1]
+    return (
+        f"\n⚠ Column name fix: '{bad_ref}' does not exist."
+        f"\n  Look up '{bad_col}' in the DATABASE SCHEMA section above and use the exact name shown there."
+        f"\n  Common corrections: email → e_mail | first_name → firstname | last_name → lastname"
+        f"\n  Do NOT remove the column — correct its name."
+    )
 
 
 class PromptBuilder:
@@ -129,19 +255,25 @@ class PromptBuilder:
     ) -> str:
         memory_section = memory_context if memory_context else "No prior conversation."
 
+        # Detect follow-up: memory contains a previous SQL execution
+        is_followup = "[SQL used:" in memory_section
+
         # Escape any literal braces in untrusted content before str.format()
-        # so that column names like {id} or JSON-type columns don't cause KeyError.
         system = SYSTEM_PROMPT_TEMPLATE.format(
             schema=schema_string.replace("{", "{{").replace("}", "}}"),
             memory_context=memory_section.replace("{", "{{").replace("}", "}}"),
         )
 
+        followup_section = FOLLOWUP_INSTRUCTION if is_followup else ""
+
         retry_section = ""
         if retry_feedback:
-            retry_section = RETRY_SUFFIX_TEMPLATE.format(retry_feedback=retry_feedback)
+            retry_section = RETRY_SUFFIX_TEMPLATE.format(
+                retry_feedback=retry_feedback.replace("{", "{{").replace("}", "}}")
+            )
 
-        prompt = f"{system}\n{retry_section}\nUSER QUERY: {user_query}"
-        logger.debug(f"Built prompt ({len(prompt)} chars)")
+        prompt = f"{system}{followup_section}\n{retry_section}\nUSER QUERY: {user_query}"
+        logger.debug("Built prompt (%d chars) followup=%s retry=%s", len(prompt), is_followup, bool(retry_feedback))
         return prompt
 
 

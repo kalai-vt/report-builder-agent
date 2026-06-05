@@ -121,37 +121,14 @@ class ReplayRequest(BaseModel):
     page_size: int = Field(0, ge=0, description="Rows per page (0 = server default)")
 
 
-class ClarifyRequest(BaseModel):
-    session_id: str = Field(..., description="Session ID returned by /report/generate")
-    user_answer: str = Field(..., description="User's answer to the follow-up question")
-    user_id: str = Field("demo_user")
-    user_role: str = Field("employee")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "session_id": "sess_abc123",
-                "user_answer": "Q1 2025",
-                "user_id": "user_42",
-                "user_role": "employee",
-            }
-        }
-
-
 class ReportResponse(BaseModel):
-    status: str = Field(..., description="greeting | off_topic | filter_redirect | clarification_needed | success | error")
+    status: str = Field(..., description="greeting | off_topic | filter_redirect | success | error")
 
-    # Track A
+    # Greeting / off-topic
     message: Optional[str] = None
     suggestions: Optional[List[str]] = None
 
-    # Track B
-    follow_up_question: Optional[str] = None
-    follow_up_options: Optional[List[str]] = None
-    clarification_round: Optional[int] = None
-    original_prompt: Optional[str] = None
-
-    # Track C / success
+    # Success
     enriched_prompt: Optional[str] = None
     sql_query: Optional[str] = None
     explanation: Optional[str] = None
@@ -219,15 +196,6 @@ def _build_report_response(
             message=result.get("message", ""),
             session_id=session_id,
         )
-    if status == "clarification_needed":
-        return ReportResponse(
-            status="clarification_needed",
-            follow_up_question=result.get("follow_up_question", ""),
-            follow_up_options=result.get("follow_up_options", []),
-            clarification_round=result.get("clarification_round", 0),
-            original_prompt=result.get("original_prompt", original_prompt),
-            session_id=session_id,
-        )
     # success (may carry an error field if SQL execution failed)
     return ReportResponse(
         status="success",
@@ -278,8 +246,6 @@ async def run_query(request: QueryRequest):
             "original_prompt": request.query,
             "user_id": "demo_user",
             "user_role": "employee",
-            "clarification_round": 0,
-            "prior_followup": "",
         })
 
         result = await report_service.generate(
@@ -324,22 +290,18 @@ async def run_query(request: QueryRequest):
         "Submit a natural language query. Returns one of:\n\n"
         "- **greeting** — social/conversational opener; warm reply + report suggestion\n"
         "- **off_topic** — unrelated to KRA; polite decline + redirect\n"
-        "- **clarification_needed** — missing info; one follow-up question returned\n"
         "- **success** — SQL executed, data returned\n\n"
-        "The returned `session_id` enables `/report/clarify`, "
-        "`/report/refresh/{session_id}`, and `/report/stream/{session_id}`."
+        "The returned `session_id` enables "
+        "`/report/refresh/{session_id}` and `/report/stream/{session_id}`."
     ),
 )
 async def generate_report(request: GenerateRequest) -> ReportResponse:
     try:
-        session_data = {
+        session_id = session_store.create({
             "original_prompt": request.query,
             "user_id": request.user_id,
             "user_role": request.user_role,
-            "clarification_round": 0,
-            "prior_followup": "",
-        }
-        session_id = session_store.create(session_data)
+        })
 
         # Short-circuit: if the frontend has data loaded and the user is asking
         # to filter/sort via chat, redirect them to the UI filter controls.
@@ -362,8 +324,6 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
             user_id=request.user_id,
             query=request.query,
             user_role=request.user_role,
-            clarification_round=0,
-            prior_followup="",
             session_id=session_id,
             page=request.page,
             page_size=effective_page_size,
@@ -385,13 +345,6 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
             logger.info(f"[generate] after top-N cap: data_rows={len(result.get('data') or [])} sql_has_limit={'LIMIT' in (result.get('sql_query') or '').upper()}")
 
         status = result.get("status", "success")
-
-        if status == "clarification_needed":
-            session_store.update(session_id, {
-                "prior_followup": result.get("follow_up_question", ""),
-                "clarification_round": 0,
-            })
-
         logger.info(f"[generate] user={request.user_id} status={status} session={session_id}")
         return _build_report_response(status, result, session_id, request.query)
 
@@ -427,8 +380,6 @@ async def replay_report(request: ReplayRequest) -> ReportResponse:
             "original_prompt": f"[replay] {request.sql_query[:120]}",
             "user_id": request.user_id,
             "user_role": request.user_role,
-            "clarification_round": 0,
-            "prior_followup": "",
         })
 
         status = result.get("status", "success")
@@ -469,63 +420,6 @@ async def replay_report(request: ReplayRequest) -> ReportResponse:
         raise
     except Exception as exc:
         logger.exception(f"[replay] error: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post(
-    "/report/clarify",
-    response_model=ReportResponse,
-    summary="Submit Answer to Follow-Up Clarification",
-    description=(
-        "Called after `/report/generate` returns `clarification_needed`. "
-        "Merges the user's answer with the original prompt and re-evaluates. "
-        "Maximum 2 clarification rounds — round 2 always proceeds to SQL generation."
-    ),
-)
-async def clarify_report(request: ClarifyRequest) -> ReportResponse:
-    try:
-        session = session_store.get(request.session_id)
-        if session is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Session not found or expired. Start a new request via /report/generate.",
-            )
-
-        original_prompt = session.get("original_prompt", "")
-        prior_round = session.get("clarification_round", 0)
-        prior_followup = session.get("prior_followup", "")
-        new_round = prior_round + 1
-
-        merged_query = f"{original_prompt} — {request.user_answer}"
-
-        result = await run_intent_report(
-            user_id=request.user_id,
-            query=merged_query,
-            user_role=request.user_role,
-            clarification_round=new_round,
-            prior_followup=prior_followup,
-            session_id=request.session_id,
-        )
-
-        status = result.get("status", "success")
-
-        if status == "clarification_needed":
-            session_store.update(request.session_id, {
-                "original_prompt": merged_query,
-                "prior_followup": result.get("follow_up_question", ""),
-                "clarification_round": new_round,
-            })
-
-        logger.info(
-            f"[clarify] user={request.user_id} session={request.session_id} "
-            f"round={new_round} status={status}"
-        )
-        return _build_report_response(status, result, request.session_id, merged_query)
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"[clarify] error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 

@@ -11,7 +11,6 @@ from app.graph.nodes import (
     cache_lookup_node,
     cache_store_node,
     cache_write_node,
-    clarification_node,
     error_handler_node,
     execution_engine_node,
     greeting_node,
@@ -60,7 +59,6 @@ def build_workflow():
     graph.add_node("intent_detector",            intent_detector_node)
     graph.add_node("greeting",                   greeting_node)
     graph.add_node("off_topic",                  off_topic_node)
-    graph.add_node("clarification",              clarification_node)
     graph.add_node("prompt_builder",             prompt_builder_node)
     graph.add_node("llm",                        llm_node)
     graph.add_node("sql_agent",                  sql_agent_node)
@@ -94,13 +92,11 @@ def build_workflow():
         {
             "greeting":       "greeting",
             "off_topic":      "off_topic",
-            "clarification":  "clarification",
             "prompt_builder": "prompt_builder",
         },
     )
-    graph.add_edge("greeting",      END)
-    graph.add_edge("off_topic",     END)
-    graph.add_edge("clarification", END)
+    graph.add_edge("greeting",  END)
+    graph.add_edge("off_topic", END)
 
     # ── SQL generation pipeline ───────────────────────────────────────────────
     graph.add_edge("prompt_builder", "llm")
@@ -204,11 +200,6 @@ def _base_state(extra: Dict[str, Any]) -> AgentState:
         "greeting_message":    "",
         "off_topic_reason":    "",
         "off_topic_message":   "",
-        "clarification_round": 0,
-        "follow_up_question":  "",
-        "follow_up_options":   [],
-        "user_answer":         "",
-        "prior_followup":      "",
         "extracted_filters":   {},
         "enriched_prompt":     "",
         "refresh_mode":          False,
@@ -259,42 +250,38 @@ async def run_intent_report(
     user_id: str,
     query: str,
     user_role: str = "employee",
-    clarification_round: int = 0,
-    prior_followup: str = "",
     session_id: str = "",
     debug: bool = False,
     page: int = 1,
     page_size: int = 0,
 ) -> Dict[str, Any]:
-    """Intent-aware entry point used by /report/generate and /report/clarify."""
+    """Intent-aware entry point used by /report/generate."""
     initial = _base_state({
-        "user_id":             user_id,
-        "user_query":          query,
-        "user_role":           user_role,
-        "clarification_round": clarification_round,
-        "prior_followup":      prior_followup,
-        "session_id":          session_id,
-        "debug":               debug,
-        "page":                page,
-        "page_size":           page_size or settings.PAGE_SIZE,
+        "user_id":   user_id,
+        "user_query": query,
+        "user_role":  user_role,
+        "session_id": session_id,
+        "debug":      debug,
+        "page":       page,
+        "page_size":  page_size or settings.PAGE_SIZE,
     })
     try:
         final: AgentState = await _workflow.ainvoke(initial)
         result = dict(final.get("formatted_result", {}))
         result.setdefault("status", "error" if result.get("error") else "success")
-        if result.get("status") == "success" and not result.get("enriched_prompt"):
+        if not result.get("enriched_prompt"):
             result["enriched_prompt"] = final.get("enriched_prompt", "")
         result.setdefault("cache_hit", False)
         if debug:
             result["steps"] = final.get("steps", [])
         logger.info(
             f"[workflow] intent_report user={user_id} status={result.get('status')} "
-            f"track={final.get('intent_track', '?')} round={clarification_round}"
+            f"track={final.get('intent_track', '?')}"
         )
         return result
     except Exception as exc:
         logger.exception(f"[workflow] unhandled error user={user_id}: {exc}")
-        return {"status": "success", "data": [], "row_count": 0,
+        return {"status": "error", "data": [], "row_count": 0,
                 "execution_time": 0.0, "error": f"Pipeline error: {exc}"}
 
 

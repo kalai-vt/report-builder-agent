@@ -45,17 +45,12 @@ class AgentState(TypedDict, total=False):
     refreshed_at: str           # ISO timestamp of last refresh execution
 
     # Intent Detection
-    intent_track: str           # "greeting" | "off_topic" | "incomplete" | "clear"
+    intent_track: str           # "greeting" | "off_topic" | "clear"
     intent_confidence: float    # 0.0 to 1.0
     intent_reasoning: str       # debug explanation from LLM
     greeting_message: str       # warm reply + report suggestion (greeting track only)
     off_topic_reason: str       # "general_knowledge" | "unrelated" | "personal"
     off_topic_message: str      # polite decline + KRA redirect (no bullet list)
-    clarification_round: int    # 0 = first call, 1 = after first followup, max 2
-    follow_up_question: str     # question to show the user
-    follow_up_options: List[str]  # suggested answer choices
-    user_answer: str            # user's response (populated on /clarify calls)
-    prior_followup: str         # last question asked (prevent repeating same question)
     extracted_filters: Dict[str, Any]  # e.g. {"period": "Q1 2025"}
     enriched_prompt: str        # rewritten prompt passed into prompt_builder
 

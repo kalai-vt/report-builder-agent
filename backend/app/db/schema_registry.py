@@ -353,13 +353,111 @@ class SchemaRegistry:
         return column.lower() in self.get_valid_columns(table)
 
     def validate_sql_tables(self, sql: str) -> List[str]:
-        """
-        Extract table names from SQL, return those absent from the schema.
-        Fails-open when registry not loaded (cold-start safety).
-        """
+        """Return table names in the SQL that are absent from the schema."""
         if not self._loaded:
             return []
         return [t for t in _extract_sql_tables(sql) if not self.is_valid_table(t)]
+
+    # ── Alias-aware column validation ─────────────────────────────────────────
+
+    def _build_alias_map(self, sql: str) -> Dict[str, str]:
+        """Return {alias_lower: table_name} from FROM/JOIN clauses."""
+        alias_map: Dict[str, str] = {}
+        # Matches: FROM|JOIN table_name [AS] alias
+        pattern = re.compile(
+            r"(?:FROM|JOIN)\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?"
+            r"\s+(?:AS\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?",
+            re.IGNORECASE,
+        )
+        for m in pattern.finditer(sql):
+            table_raw = m.group(1)
+            alias_raw = m.group(2)
+            table_lower = table_raw.lower()
+            alias_lower = alias_raw.lower()
+            # Only register when the alias word is not a SQL keyword and table is known
+            if alias_lower.upper() not in _SQL_KEYWORDS and table_lower in self._tables:
+                alias_map[alias_lower] = table_lower
+            # Also map the table name directly to itself
+            if table_lower in self._tables:
+                alias_map[table_lower] = table_lower
+        return alias_map
+
+    @staticmethod
+    def _normalize(name: str) -> str:
+        """Strip underscores and lowercase — used for fuzzy column matching."""
+        return name.lower().replace("_", "")
+
+    def _find_suggestion(self, table: str, bad_col: str) -> Optional[str]:
+        """Find the closest valid column name for bad_col in table."""
+        valid = self.get_valid_columns(table)
+        if not valid:
+            return None
+        bad_n = self._normalize(bad_col)
+        # 1. Exact normalised match  (email → e_mail, is_deleted → is_delete)
+        for col in valid:
+            if self._normalize(col) == bad_n:
+                return col
+        # 2. Prefix / suffix containment  (manager_id → reporting_manager)
+        for col in valid:
+            col_n = self._normalize(col)
+            if bad_n in col_n or col_n in bad_n:
+                return col
+        return None
+
+    def validate_sql_columns(self, sql: str) -> List[tuple]:
+        """
+        Parse the SQL, extract alias.column references, and validate each
+        column against the schema.
+
+        Returns list of (alias_dot_col, table_name, suggestion_or_None) for
+        every column reference that is NOT in the schema JSON.
+        Fails-open (returns []) when the registry is not loaded.
+        """
+        if not self._loaded:
+            return []
+
+        alias_map = self._build_alias_map(sql)
+        if not alias_map:
+            return []
+
+        # Strip string literals so quoted values like 'e_mail' aren't scanned
+        sql_clean = re.sub(r"'[^']*'", "''", sql)
+        sql_clean = re.sub(r'"[^"]*"', '""', sql_clean)
+
+        # Find all alias.column references
+        col_ref_re = re.compile(
+            r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)\b"
+        )
+        invalid: List[tuple] = []
+        seen: set = set()
+
+        for m in col_ref_re.finditer(sql_clean):
+            alias = m.group(1).lower()
+            col   = m.group(2).lower()
+            ref   = f"{m.group(1)}.{m.group(2)}"
+
+            if alias not in alias_map:
+                continue                          # unknown alias — skip
+            if col.upper() in _SQL_KEYWORDS:
+                continue                          # SQL function names — skip
+            if ref.lower() in seen:
+                continue
+            seen.add(ref.lower())
+
+            table = alias_map[alias]
+            table_info = self._tables.get(table)
+            if not table_info:
+                continue
+
+            if col not in table_info.column_set:
+                suggestion = self._find_suggestion(table, col)
+                invalid.append((ref, table, suggestion))
+                logger.debug(
+                    "[schema_registry] invalid column %s in %s → suggestion: %s",
+                    ref, table, suggestion,
+                )
+
+        return invalid
 
     # ── Misc helpers ──────────────────────────────────────────────────────────
 
