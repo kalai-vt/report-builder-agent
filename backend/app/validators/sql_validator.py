@@ -41,6 +41,19 @@ _HARDCODED_EMP_ID_RE = re.compile(
 
 _GOAL_HISTORY_RE = re.compile(r"\bgoal_history\b", re.IGNORECASE)
 
+# Catches the pattern where reporting_manager is joined to get "feedback" — the
+# manager's display NAME from u.reporting_manager is not feedback text.
+# Feedback text comes from remarks_table.remarks (manager) / remarks_threads.remark_text (employee).
+_REPORTING_MGR_FEEDBACK_RE = re.compile(
+    r"\breporting_manager_feedback\b",
+    re.IGNORECASE,
+)
+# Catches rt.remarks aliased as employee_feedback — remarks_table.remarks is MANAGER feedback.
+_REMARKS_AS_EMP_FEEDBACK_RE = re.compile(
+    r"\brt\.remarks\s+AS\s+employee_feedback\b",
+    re.IGNORECASE,
+)
+
 # Detects "last/past/recent N months/years" in user query
 _RECENT_PERIOD_RE = re.compile(
     r"\b(last|past|recent|within)\s+\d+\s*(month|year|week)s?\b",
@@ -112,6 +125,28 @@ class SQLValidator:
                     "-- 'last N months' date filter: AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL N MONTH) "
                     "-- 'not completed' status filter: AND s.status_name != 'Completed' "
                     "-- name filter: AND u.firstname LIKE '%Name%'"
+                ),
+                sql,
+            )
+
+        # ── reporting_manager join misused as feedback source ─────────────────────
+        if _REPORTING_MGR_FEEDBACK_RE.search(sql) or _REMARKS_AS_EMP_FEEDBACK_RE.search(sql):
+            logger.warning("[sql_validator] wrong feedback join pattern, user=%s", user_id)
+            return (
+                ValidationStatus.INVALID,
+                (
+                    "Wrong feedback join detected. "
+                    "u.reporting_manager gives the manager's DISPLAY NAME — it is NOT feedback text. "
+                    "remarks_table.remarks is MANAGER feedback — never label it 'employee_feedback'. "
+                    "Use this exact pattern for KRA with feedback:\n"
+                    "LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id "
+                    "-- rt.remarks AS manager_feedback\n"
+                    "LEFT JOIN user_table m ON rt.given_by = m.employee_id "
+                    "-- CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by\n"
+                    "LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id "
+                    "-- r.remark_text AS employee_feedback\n"
+                    "LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id "
+                    "-- CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager"
                 ),
                 sql,
             )
