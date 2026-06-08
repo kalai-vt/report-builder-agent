@@ -58,7 +58,12 @@ PERIOD / MONTH TERMS:
 4. Use explicit JOIN ... ON conditions — no implicit/cartesian joins
 5. Prefer table aliases for readability
 6. Use DATE_FORMAT, YEAR(), MONTH() for date filtering when needed
-7. Aggregate data meaningfully (GROUP BY, COUNT, SUM, AVG)
+7. AGGREGATION vs DETAIL — choose based on user intent:
+   - "list" / "show" / "give me" / "what are" / "display" → individual rows, NO GROUP BY, NO COUNT
+     Example: "list the goals for Baskar" → one row per goal with goal_desc, status, target_date
+   - "count" / "how many" / "total" / "summary" / "overview" → aggregate with COUNT/GROUP BY
+   - "categorized by" / "grouped by" / "wise" → aggregate summary with GROUP BY
+   NEVER apply GROUP BY or COUNT when the user says "list", "show", or "display".
 8. Column names must exactly match the schema above
 9. NEVER hardcode an employee ID. When filtering by the logged-in user,
    use the named parameter :employee_id (e.g. WHERE employee_id = :employee_id).
@@ -100,10 +105,29 @@ PERIOD / MONTH TERMS:
     - Last name           → u.lastname           (NOT u.last_name)
     - Manager reference   → u.reporting_manager  (NOT u.manager_id, NOT u.manager, NOT u.manager_employee_id)
       • reporting_manager stores the manager's employee_id as a VARCHAR.
-      • To join to the manager's record: LEFT JOIN user_table m ON u.reporting_manager = m.employee_id
+      • For reporting manager display name only: LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
+        → CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
     - Soft-delete flag    → u.is_delete          (NOT u.is_deleted, NOT u.deleted)
     If a column name you want is NOT listed in the schema, do NOT guess or invent a name.
     Look it up in the schema above and use the exact name shown there.
+
+    FEEDBACK SOURCES — never mix these up:
+    ┌──────────────────────────┬──────────────────────────────────────────────────────────────────────┐
+    │ Feedback type            │ Source & JOIN                                                        │
+    ├──────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+    │ Manager feedback (text)  │ rt.remarks  FROM remarks_table                                       │
+    │                          │ → LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id             │
+    │                          │ → rt.given_by = manager's employee_id who wrote the remark           │
+    │                          │ → Manager name: LEFT JOIN user_table m ON rt.given_by = m.employee_id│
+    │ Employee feedback (text) │ r.remark_text  FROM remarks_threads                                  │
+    │                          │ → LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id             │
+    │ Reporting manager name   │ CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_mgr  │
+    │ (display only)           │ → LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id  │
+    └──────────────────────────┴──────────────────────────────────────────────────────────────────────┘
+    CRITICAL RULES:
+    • NEVER alias a user_table join on u.reporting_manager as "feedback" — it is a display name, not feedback text.
+    • NEVER label rt.remarks as "employee_feedback" — it is the MANAGER's remark.
+    • NEVER call the reporting manager name column "reporting_manager_feedback" — feedback comes from remarks_table.
 
 13. EMPLOYEE NAME SEARCH — use LIKE on separate name columns, NEVER on CONCAT:
     Schema columns: user_table.firstname, user_table.lastname, user_table.employee_id
@@ -172,7 +196,7 @@ PERIOD / MONTH TERMS:
     Rule 11d (don't hardcode status values) does NOT apply to 'Completed' — it is the standard
     completion status and must always be used when the user asks about completion.
 
-    a) KRA / GOAL STATUS REPORT:
+    a) KRA / GOAL LIST (use when user says "list goals", "show goals", "what are the goals" — NO GROUP BY, NO COUNT):
        SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
               d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
               s.status_name AS goal_status, ugm.target_date, ugm.assigned_date
@@ -281,6 +305,28 @@ PERIOD / MONTH TERMS:
        -- Month/period filter: AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
        GROUP BY u.stream
        ORDER BY compliant_employees DESC
+
+    m) KRA WITH FEEDBACK (manager remark + employee self-assessment + reporting manager):
+       -- Use when user asks for KRA report "including feedback", "with remarks", "with manager feedback"
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+              s.status_name AS goal_status, ugm.target_date, ugm.assigned_date,
+              rt.remarks AS manager_feedback,
+              CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by,
+              r.remark_text AS employee_feedback,
+              CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
+       FROM user_goal_mapping ugm
+       JOIN user_table u      ON ugm.employee_id = u.employee_id
+       JOIN designation d     ON u.designation_id = d.designation_id
+       JOIN master_goals mg   ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s     ON ugm.status_id = s.id
+       LEFT JOIN remarks_table rt  ON ugm.goal_id = rt.goal_id        -- manager feedback text
+       LEFT JOIN user_table m      ON rt.given_by = m.employee_id     -- person who gave the remark
+       LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id         -- employee self-assessment
+       LEFT JOIN user_table mgr    ON u.reporting_manager = mgr.employee_id  -- reporting manager name
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+       -- Employee filter: AND u.employee_id = 'VT136'  OR  AND u.firstname LIKE '%Name%'
+       -- Date filter   : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
 
     i) RNR NOMINATIONS:
        SELECT CONCAT(TRIM(n.firstname),' ',TRIM(n.lastname),' (',n.employee_id,')') AS nominee,
