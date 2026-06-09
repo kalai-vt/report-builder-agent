@@ -25,6 +25,27 @@ KRA COMPLIANCE TERMS:
   "overdue goals" / "missed targets"
       → ugm.target_date < CURDATE() AND s.status_name != 'Completed'
 
+APPROVAL / ASSIGNMENT TERMS — use pattern o) for these:
+  "pending approval" / "awaiting approval" / "submitted for approval" / "pending manager approval"
+      → Goals submitted but awaiting manager action
+      → Filter: s.status_name LIKE '%Pending%'
+      → MUST include ugm.assigned_by (who assigned/submitted the goal — their employee_id)
+      → JOIN user_table ab ON ugm.assigned_by = ab.employee_id
+      → Display: CONCAT(TRIM(ab.firstname),' ',TRIM(ab.lastname),' (',ab.employee_id,')') AS assigned_by
+      → Also show reporting_manager: LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
+      → NEVER use approval_history for KRA goals (it is for skills/badges/certifications ONLY)
+      → NEVER invent columns approval_status, approved_by, approval_date — these do NOT exist in user_goal_mapping
+  "assigned by [person]" / "goals assigned by [manager]"
+      → Filter: ugm.assigned_by = (subquery or employee_id of named person)
+
+MANAGER VIEW TERMS — use pattern n) for these:
+  "by manager" / "grouped by manager" / "manager-wise" / "per manager" / "under each manager"
+      → Manager is the leading dimension — show manager as the FIRST column
+      → JOIN: LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
+      → Display: CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname),' (',mgr.employee_id,')') AS manager
+      → ORDER BY manager, u.firstname  (do NOT GROUP BY unless also counting)
+      → The query lists individual employees under each manager, NOT an aggregate count
+
 GROUPING / CATEGORIZATION TERMS (these require GROUP BY in SQL):
   "department-wise" / "by department" / "categorized by department"
       → GROUP BY u.stream ORDER BY department  (u.stream IS the department column)
@@ -164,7 +185,30 @@ PERIOD / MONTH TERMS:
     h) Employee display always uses:
        CONCAT(TRIM(u.firstname), ' ', TRIM(u.lastname), ' (', u.employee_id, ')') AS employee
 
-14. QUERY PATTERNS — follow these JOIN chains for every common report type.
+14. COLUMN SELECTION GUIDANCE — pick the right pattern based on query intent:
+    ┌──────────────────────────────────────┬────────────────────────────────────────────────────────────────────────┐
+    │ User intent                          │ Pattern & distinctive columns                                          │
+    ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+    │ "list goals" / "show goals"          │ a) employee, designation, goal_name, custom_goal, goal_status,         │
+    │                                      │    target_date, assigned_date                                          │
+    ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+    │ "by manager" / "per manager" /       │ n) manager (FIRST), employee, designation, department,                 │
+    │ "manager-wise" / "under manager"     │    goal_name, custom_goal, goal_status, target_date, assigned_date     │
+    ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+    │ "pending approval" /                 │ o) employee, designation, department, goal_name, custom_goal,          │
+    │ "awaiting approval" /                │    goal_status, assigned_by (approver), reporting_manager,             │
+    │ "submitted for approval"             │    assigned_date, target_date                                           │
+    ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+    │ "with feedback" / "with remarks"     │ m) employee + goal_name + goal_status + manager_feedback +             │
+    │                                      │    employee_feedback + reporting_manager                                │
+    ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+    │ "non-compliance" / "non-compliant"   │ j) department, COUNT(non-compliant employees), COUNT(goals)            │
+    │                                      │    OR k) department, employee, goal_name, goal_status, target_date     │
+    └──────────────────────────────────────┴────────────────────────────────────────────────────────────────────────┘
+    CRITICAL: Different query intents MUST produce different column sets — never return the same columns
+    for "list goals", "by manager", and "pending approval" queries.
+
+15. QUERY PATTERNS — follow these JOIN chains for every common report type.
     NEVER use goal_history for current goal reports — use user_goal_mapping.
     NEVER use EXISTS (SELECT 1 FROM goal_history ...) as a filter in any KRA or goal report.
     The date range filter for KRA reports must be applied on ugm.target_date in user_goal_mapping — NOT on goal_history.
@@ -330,6 +374,49 @@ PERIOD / MONTH TERMS:
        -- Employee filter: AND u.employee_id = 'VT136'  OR  AND u.firstname LIKE '%Name%'
        -- Date filter   : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
 
+    n) KRA BY MANAGER (use when user says "by manager", "manager-wise", "per manager", "under each manager"):
+       -- Manager is the FIRST column; employees are listed under their manager
+       -- Do NOT use GROUP BY unless user explicitly asks for a count/summary
+       SELECT CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname),' (',mgr.employee_id,')') AS manager,
+              CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, u.stream AS department,
+              mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+              s.status_name AS goal_status, ugm.target_date, ugm.assigned_date
+       FROM user_goal_mapping ugm
+       JOIN user_table u    ON ugm.employee_id = u.employee_id
+       JOIN designation d   ON u.designation_id = d.designation_id
+       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s   ON ugm.status_id = s.id
+       LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+       -- Status filter : AND s.status_name != 'Completed'  (if user adds a status filter)
+       -- Date filter   : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+       ORDER BY manager, u.firstname
+
+    o) KRA PENDING APPROVAL (use when user says "pending approval", "awaiting approval", "submitted for approval"):
+       -- Shows who assigned the goal (assigned_by) as the approver context
+       -- Filter: s.status_name LIKE '%Pending%'
+       -- NEVER use approval_history for KRA goals; NEVER add approval_status/approved_by/approval_date columns
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              d.designation_name, u.stream AS department,
+              mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+              s.status_name AS goal_status,
+              CONCAT(TRIM(ab.firstname),' ',TRIM(ab.lastname),' (',ab.employee_id,')') AS assigned_by,
+              CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager,
+              ugm.assigned_date, ugm.target_date
+       FROM user_goal_mapping ugm
+       JOIN user_table u    ON ugm.employee_id = u.employee_id
+       JOIN designation d   ON u.designation_id = d.designation_id
+       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+       LEFT JOIN status s   ON ugm.status_id = s.id
+       LEFT JOIN user_table ab  ON ugm.assigned_by = ab.employee_id
+       LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
+       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+         AND s.status_name LIKE '%Pending%'
+       -- Employee filter: AND u.firstname LIKE '%Name%'
+       -- Date filter    : AND ugm.assigned_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+       ORDER BY ugm.assigned_date DESC
+
     i) RNR NOMINATIONS:
        SELECT CONCAT(TRIM(n.firstname),' ',TRIM(n.lastname),' (',n.employee_id,')') AS nominee,
               CONCAT(TRIM(nr.firstname),' ',TRIM(nr.lastname)) AS nominated_by,
@@ -372,6 +459,16 @@ Rules:
      For email: use u.e_mail — NOT u.email.
 """
 
+ACTIVE_CONTEXT_SECTION = """
+════════════════════════════════════════
+ ACTIVE REPORT CONTEXT
+════════════════════════════════════════
+This is the structured context of the report currently being refined:
+  Report type : {report_type}
+  Last query  : {last_query}
+  Base SQL    : {generated_sql}
+"""
+
 RETRY_SUFFIX_TEMPLATE = """
 ════════════════════════════════════════
  PREVIOUS ATTEMPT FAILED — FIX REQUIRED
@@ -410,11 +507,14 @@ class PromptBuilder:
         schema_string: str,
         memory_context: str = "",
         retry_feedback: str = "",
+        relationship_type: str = "new_request",
+        active_report_context: dict = None,
     ) -> str:
         memory_section = memory_context if memory_context else "No prior conversation."
 
-        # Detect follow-up: memory contains a previous SQL execution
-        is_followup = "[SQL used:" in memory_section
+        # Follow-up is determined exclusively by the relationship classifier.
+        # Never infer it from raw SQL presence in memory (that caused Bug 1).
+        is_followup = (relationship_type == "followup")
 
         # Escape any literal braces in untrusted content before str.format()
         system = SYSTEM_PROMPT_TEMPLATE.format(
@@ -422,7 +522,17 @@ class PromptBuilder:
             memory_context=memory_section.replace("{", "{{").replace("}", "}}"),
         )
 
-        followup_section = FOLLOWUP_INSTRUCTION if is_followup else ""
+        followup_section = ""
+        if is_followup:
+            ctx = active_report_context or {}
+            # Only inject active context section when we have meaningful data
+            if ctx.get("generated_sql") or ctx.get("last_query"):
+                followup_section = ACTIVE_CONTEXT_SECTION.format(
+                    report_type=ctx.get("report_type", "previous report"),
+                    last_query=ctx.get("last_query", "").replace("{", "{{").replace("}", "}}"),
+                    generated_sql=ctx.get("generated_sql", "").replace("{", "{{").replace("}", "}}"),
+                )
+            followup_section += FOLLOWUP_INSTRUCTION
 
         retry_section = ""
         if retry_feedback:
@@ -431,7 +541,10 @@ class PromptBuilder:
             )
 
         prompt = f"{system}{followup_section}\n{retry_section}\nUSER QUERY: {user_query}"
-        logger.debug("Built prompt (%d chars) followup=%s retry=%s", len(prompt), is_followup, bool(retry_feedback))
+        logger.debug(
+            "Built prompt (%d chars) relationship=%s retry=%s",
+            len(prompt), relationship_type, bool(retry_feedback),
+        )
         return prompt
 
 

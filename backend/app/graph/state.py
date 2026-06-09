@@ -8,6 +8,10 @@ class AgentState(TypedDict, total=False):
     user_role: str          # "employee" | "lead" | "manager" | "hr"
     debug: bool
 
+    # Conversation-level session (frontend-generated UUID, stable across multiple queries)
+    # Distinct from session_id which is a per-query Redis cache key.
+    chat_session_id: str
+
     # Context
     schema: str
     memory_context: str
@@ -53,6 +57,14 @@ class AgentState(TypedDict, total=False):
     off_topic_message: str      # polite decline + KRA redirect (no bullet list)
     extracted_filters: Dict[str, Any]  # e.g. {"period": "Q1 2025"}
     enriched_prompt: str        # rewritten prompt passed into prompt_builder
+
+    # Relationship Classification (follow-up vs new request)
+    relationship_type: str           # "followup" | "new_request" | "uncertain"
+    relationship_confidence: float   # 0.0 to 1.0
+    clarification_question: str      # populated when relationship_type == "uncertain"
+
+    # Active Report Context (structured state for the current open report)
+    active_report_context: Dict[str, Any]
 
     # SQL Test Execution (LIMIT 0 dry-run before full execution)
     test_execution_passed: bool   # True when LIMIT 0 dry-run succeeded

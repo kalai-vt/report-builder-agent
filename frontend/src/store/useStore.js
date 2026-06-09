@@ -21,10 +21,50 @@ function _enrichFollowUp(query, chatHistory) {
   return `${base}. Also: ${query}`
 }
 
+// Pure filter function — used by applyFilters for both page data and full dataset.
+function _filterRows(rows, filters) {
+  let filtered = [...rows]
+  Object.entries(filters).forEach(([col, filter]) => {
+    if (!filter) return
+    const { type, value } = filter
+    if (value === null || value === undefined || value === '') return
+    if (Array.isArray(value) && value.length === 0) return
+    filtered = filtered.filter((row) => {
+      const cell = row[col]
+      if (type === 'text_search' || type === 'text')
+        return String(cell ?? '').toLowerCase().includes(String(value).toLowerCase())
+      if (type === 'categorical') {
+        if (Array.isArray(value)) return value.length === 0 || value.includes(String(cell ?? ''))
+        return String(cell ?? '') === String(value)
+      }
+      if (type === 'numeric_range') {
+        const num = parseFloat(cell)
+        if (isNaN(num)) return false
+        const { min, max } = value || {}
+        if (min !== '' && min !== null && min !== undefined && !isNaN(+min) && num < +min) return false
+        if (max !== '' && max !== null && max !== undefined && !isNaN(+max) && num > +max) return false
+        return true
+      }
+      if (type === 'date_range') {
+        const dt = new Date(cell)
+        const { from, to } = value || {}
+        if (from && dt < new Date(from)) return false
+        if (to && dt > new Date(to + 'T23:59:59')) return false
+        return true
+      }
+      return true
+    })
+  })
+  return filtered
+}
+
 const INITIAL_REPORT = {
   status: null,
   reportData: [],
   filteredData: [],
+  fullReportData: [],      // all rows across all pages — used for export
+  filteredFullData: [],    // fullReportData after activeFilters applied
+  isLoadingFullData: false,// true while background page-fetching is in progress
   columns: [],
   explanation: '',
   sqlQuery: '',
@@ -163,16 +203,25 @@ const useStore = create(
           if (data.status === 'success') {
             const rows = data.data || []
             const cols = rows.length > 0 ? Object.keys(rows[0]) : get().columns
+            const totalPages = data.total_pages || 1
+            const effectivePageSize = data.page_size || pageSize || 1000
             set({
               status: 'success',
               reportData: rows, filteredData: rows, columns: cols,
               rowCount: data.row_count ?? rows.length,
               totalRows: data.total_rows ?? rows.length,
+              totalPages,
+              hasNextPage: data.has_next_page || false,
+              hasPrevPage: data.has_prev_page || false,
               refreshMode: data.refresh_mode ?? true,
               refreshedAt: data.refreshed_at || new Date().toISOString(),
               hasData: rows.length > 0,
               activeFilters: {},
+              fullReportData: rows,
+              filteredFullData: rows,
+              isLoadingFullData: totalPages > 1,
             })
+            get()._loadRemainingPages(rows, totalPages, effectivePageSize)
           } else if (data.error_code) {
             set({ error: data.message || 'Refresh failed', errorCode: data.error_code })
           }
@@ -185,7 +234,7 @@ const useStore = create(
 
       // ── Page navigation (no chatHistory changes) ──────────────────────────────
       loadPage: async (pageNum) => {
-        const { sessionId, userId, pageSize } = get()
+        const { sessionId, userId, pageSize, fullReportData } = get()
         if (!sessionId) return
         set({ isLoading: true })
         try {
@@ -201,6 +250,8 @@ const useStore = create(
             hasNextPage: d.has_next_page || false,
             hasPrevPage: d.has_prev_page || false,
             activeFilters: {},
+            // Clearing filters resets filteredFullData to the complete dataset
+            filteredFullData: fullReportData,
           })
         } catch (err) {
           set({ error: err.message || 'Page load failed' })
@@ -211,46 +262,18 @@ const useStore = create(
 
       // ── Client-side filters ───────────────────────────────────────────────────
       applyFilters: (filters) => {
-        const { reportData } = get()
-        let filtered = [...reportData]
-
-        Object.entries(filters).forEach(([col, filter]) => {
-          if (!filter) return
-          const { type, value } = filter
-          if (value === null || value === undefined || value === '') return
-          if (Array.isArray(value) && value.length === 0) return
-
-          filtered = filtered.filter((row) => {
-            const cell = row[col]
-            if (type === 'text_search' || type === 'text')
-              return String(cell ?? '').toLowerCase().includes(String(value).toLowerCase())
-            if (type === 'categorical') {
-              if (Array.isArray(value)) return value.length === 0 || value.includes(String(cell ?? ''))
-              return String(cell ?? '') === String(value)
-            }
-            if (type === 'numeric_range') {
-              const num = parseFloat(cell)
-              if (isNaN(num)) return false
-              const { min, max } = value || {}
-              if (min !== '' && min !== null && min !== undefined && !isNaN(+min) && num < +min) return false
-              if (max !== '' && max !== null && max !== undefined && !isNaN(+max) && num > +max) return false
-              return true
-            }
-            if (type === 'date_range') {
-              const dt = new Date(cell)
-              const { from, to } = value || {}
-              if (from && dt < new Date(from)) return false
-              if (to && dt > new Date(to + 'T23:59:59')) return false
-              return true
-            }
-            return true
-          })
+        const { reportData, fullReportData } = get()
+        set({
+          filteredData: _filterRows(reportData, filters),
+          filteredFullData: _filterRows(fullReportData, filters),
+          activeFilters: filters,
         })
-
-        set({ filteredData: filtered, activeFilters: filters })
       },
 
-      clearFilters: () => set({ filteredData: get().reportData, activeFilters: {} }),
+      clearFilters: () => {
+        const { reportData, fullReportData } = get()
+        set({ filteredData: reportData, filteredFullData: fullReportData, activeFilters: {} })
+      },
 
       // ── Saved reports ─────────────────────────────────────────────────────────
       saveReport: (name) => {
@@ -304,6 +327,8 @@ const useStore = create(
 
           const rows = data.data || []
           const cols = rows.length > 0 ? Object.keys(rows[0]) : []
+          const totalPages = data.total_pages || 1
+          const effectivePageSize = data.page_size || 1000
           set({
             status: 'success',
             sessionId: data.session_id,
@@ -319,9 +344,9 @@ const useStore = create(
             dimensions: data.dimensions || [],
             recommendedFilters: data.recommended_column_filters || [],
             page: data.page || 1,
-            pageSize: data.page_size || 1000,
+            pageSize: effectivePageSize,
             totalRows: data.total_rows ?? rows.length,
-            totalPages: data.total_pages || 1,
+            totalPages,
             hasNextPage: data.has_next_page || false,
             hasPrevPage: data.has_prev_page || false,
             refreshMode: true,
@@ -329,7 +354,11 @@ const useStore = create(
             hasData: rows.length > 0,
             activeFilters: {},
             error: null,
+            fullReportData: rows,
+            filteredFullData: rows,
+            isLoadingFullData: totalPages > 1,
           })
+          get()._loadRemainingPages(rows, totalPages, effectivePageSize)
         } catch (err) {
           const detail = err.response?.data?.detail || err.message || 'Failed to load saved report.'
           set({ status: 'error', error: detail, errorCode: null })
@@ -345,7 +374,16 @@ const useStore = create(
         if (data.error_code) { set({ error: data.message || data.error_code }); return }
         const rows = data.data || []
         const cols = rows.length > 0 ? Object.keys(rows[0]) : get().columns
-        set({ status: 'success', reportData: rows, filteredData: rows, columns: cols, rowCount: data.row_count || rows.length, refreshMode: true, refreshedAt: data.refreshed_at || new Date().toISOString(), activeFilters: {}, hasData: rows.length > 0 })
+        set({
+          status: 'success', reportData: rows, filteredData: rows, columns: cols,
+          rowCount: data.row_count || rows.length,
+          refreshMode: true, refreshedAt: data.refreshed_at || new Date().toISOString(),
+          activeFilters: {},
+          hasData: rows.length > 0,
+          fullReportData: rows,
+          filteredFullData: rows,
+          isLoadingFullData: false,
+        })
       },
 
       // ── UI helpers ────────────────────────────────────────────────────────────
@@ -353,6 +391,32 @@ const useStore = create(
       clearMessage: () => set({ message: null, suggestions: null }),
       clearChat:    () => set({ chatHistory: [], pendingThinkingId: null, ...INITIAL_REPORT, sessionId: null, currentPrompt: '' }),
       reset:        () => set({ ...INITIAL_REPORT, sessionId: null, currentPrompt: '' }),
+
+      // ── Private: background-fetch remaining pages for export dataset ──────────
+      _loadRemainingPages: async (page1Rows, totalPages, pageSize) => {
+        if (totalPages <= 1) {
+          set({ isLoadingFullData: false })
+          return
+        }
+        const { sessionId, userId } = get()
+        if (!sessionId) { set({ isLoadingFullData: false }); return }
+
+        const allRows = [...page1Rows]
+        try {
+          for (let p = 2; p <= totalPages; p++) {
+            const res = await api.getReportPage(sessionId, userId, p, pageSize)
+            const pageRows = res.data?.data || []
+            allRows.push(...pageRows)
+          }
+        } catch (_) {
+          // Network error mid-way — export partial data rather than nothing
+        }
+        const { activeFilters } = get()
+        const filtered = Object.keys(activeFilters).length > 0
+          ? _filterRows(allRows, activeFilters)
+          : allRows
+        set({ fullReportData: allRows, filteredFullData: filtered, isLoadingFullData: false })
+      },
 
       // ── Private: response handler ─────────────────────────────────────────────
       _handleResponse: (data, prompt) => {
@@ -400,6 +464,8 @@ const useStore = create(
           const rows = data.data || []
           const cols = rows.length > 0 ? Object.keys(rows[0]) : []
           const totalRows = data.total_rows ?? data.row_count ?? rows.length
+          const totalPages = data.total_pages || 1
+          const effectivePageSize = data.page_size || 1000
 
           set({
             status: 'success',
@@ -415,9 +481,9 @@ const useStore = create(
             dimensions: data.dimensions || [],
             recommendedFilters: data.recommended_column_filters || [],
             page: data.page || 1,
-            pageSize: data.page_size || 1000,
+            pageSize: effectivePageSize,
             totalRows,
-            totalPages: data.total_pages || 1,
+            totalPages,
             hasNextPage: data.has_next_page || false,
             hasPrevPage: data.has_prev_page || false,
             refreshMode: data.refresh_mode || false,
@@ -426,6 +492,9 @@ const useStore = create(
             hasData: rows.length > 0,
             clarification: null, message: null, suggestions: null,
             activeFilters: {},
+            fullReportData: rows,
+            filteredFullData: rows,
+            isLoadingFullData: totalPages > 1,
             chatHistory: replaceThinking({
               id: msgId, role: 'assistant', type: 'report',
               explanation: data.explanation || '',
@@ -433,6 +502,7 @@ const useStore = create(
               ts: _now(),
             }),
           })
+          get()._loadRemainingPages(rows, totalPages, effectivePageSize)
           return
         }
 
