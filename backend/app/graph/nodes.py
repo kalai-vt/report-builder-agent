@@ -144,7 +144,6 @@ def prompt_builder_node(state: AgentState) -> Dict[str, Any]:
 
     built_prompt = prompt_builder.build_prompt(
         user_query=effective_query,
-        user_id=state["user_id"],
         schema_string=schema_str,
         memory_context=state.get("memory_context", ""),
         retry_feedback=state.get("retry_feedback", ""),

@@ -51,5 +51,8 @@ class Settings:
     STREAM_CACHE_TTL_SECONDS: int = int(os.getenv("STREAM_CACHE_TTL_SECONDS", "3600"))
     STREAM_REFRESH_INTERVAL_SECONDS: int = int(os.getenv("STREAM_REFRESH_INTERVAL_SECONDS", "30"))
 
+    ENABLE_FEW_SHOT_RETRIEVAL: bool = os.getenv("ENABLE_FEW_SHOT_RETRIEVAL", "true").lower() == "true"
+    EXAMPLE_TOP_K: int = int(os.getenv("EXAMPLE_TOP_K", "3"))
+
 
 settings = Settings()

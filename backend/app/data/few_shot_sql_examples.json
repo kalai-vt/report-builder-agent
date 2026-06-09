@@ -1,0 +1,236 @@
+{
+  "examples": [
+    {
+      "id": "non_compliance_month",
+      "intent": "non_compliance_report",
+      "prompt": "Provide the non-compliance report for April 2026",
+      "business_meaning": "List employees whose KRA goals were not completed during a specific calendar month, filtered by target_date falling within that month",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id"
+      ],
+      "filters": {
+        "status": "s.status_name != 'Completed'",
+        "date": "YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4",
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, u.stream AS department, mg.goal_desc AS goal_name, s.status_name AS goal_status, ugm.target_date FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND s.status_name != 'Completed' AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4 ORDER BY u.stream, u.firstname"
+    },
+    {
+      "id": "non_compliance_department_wise",
+      "intent": "non_compliance_report_department",
+      "prompt": "Provide the non-compliance report for April 2026, categorized department-wise",
+      "business_meaning": "Count of non-compliant employees and incomplete goals per department (u.stream) for a specific month — aggregate summary grouped by stream",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id"
+      ],
+      "filters": {
+        "status": "s.status_name != 'Completed'",
+        "date": "YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4",
+        "grouping": "GROUP BY u.stream ORDER BY non_compliant_employees DESC"
+      },
+      "sql_pattern": "SELECT u.stream AS department, COUNT(DISTINCT ugm.employee_id) AS non_compliant_employees, COUNT(ugm.id) AS incomplete_goals FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND s.status_name != 'Completed' AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4 GROUP BY u.stream ORDER BY non_compliant_employees DESC"
+    },
+    {
+      "id": "feedback_report_year",
+      "intent": "feedback_report",
+      "prompt": "Share the feedback report for 2026, including inputs from the employee, reporting manager, and HR",
+      "business_meaning": "KRA goals with manager feedback from remarks_table, employee self-assessment from remarks_threads, and reporting manager name — filtered by year of assigned_date",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status", "remarks_table", "remarks_threads"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id",
+        "remarks_table rt ON ugm.goal_id = rt.goal_id",
+        "user_table m ON rt.given_by = m.employee_id",
+        "remarks_threads r ON r.goal_id = ugm.goal_id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "date": "YEAR(ugm.assigned_date) = 2026",
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date, rt.remarks AS manager_feedback, CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by, r.remark_text AS employee_feedback, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id LEFT JOIN user_table m ON rt.given_by = m.employee_id LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND YEAR(ugm.assigned_date) = 2026 ORDER BY u.firstname"
+    },
+    {
+      "id": "kra_report_by_name",
+      "intent": "employee_kra_report_by_name",
+      "prompt": "Provide the KRA report for the past 1 year for Baskar",
+      "business_meaning": "Full KRA report for a specific employee matched by first name — goals, manager feedback, employee feedback, reporting manager — last 1 year by target_date",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status", "remarks_table", "remarks_threads"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id",
+        "remarks_table rt ON ugm.goal_id = rt.goal_id",
+        "user_table m ON rt.given_by = m.employee_id",
+        "remarks_threads r ON r.goal_id = ugm.goal_id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "employee_name": "u.firstname LIKE '%Baskar%'",
+        "date": "ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date, rt.remarks AS manager_feedback, CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by, r.remark_text AS employee_feedback, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id LEFT JOIN user_table m ON rt.given_by = m.employee_id LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND u.firstname LIKE '%Baskar%' AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) ORDER BY ugm.target_date"
+    },
+    {
+      "id": "kra_report_by_employee_id",
+      "intent": "employee_kra_report_by_id",
+      "prompt": "Provide the report for the past 1 year for employee ID VT136",
+      "business_meaning": "Full KRA report for a specific employee looked up by exact employee_id — goals, manager feedback, employee feedback, reporting manager — last 1 year by target_date",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status", "remarks_table", "remarks_threads"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id",
+        "remarks_table rt ON ugm.goal_id = rt.goal_id",
+        "user_table m ON rt.given_by = m.employee_id",
+        "remarks_threads r ON r.goal_id = ugm.goal_id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "employee_id": "u.employee_id = 'VT136'",
+        "date": "ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date, rt.remarks AS manager_feedback, CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by, r.remark_text AS employee_feedback, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id LEFT JOIN user_table m ON rt.given_by = m.employee_id LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND u.employee_id = 'VT136' AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) ORDER BY ugm.target_date"
+    },
+    {
+      "id": "direct_reportees",
+      "intent": "direct_reportees_by_manager_name",
+      "prompt": "List all employees who directly report to Jerome",
+      "business_meaning": "Employees whose reporting_manager resolves to a named manager — self-join on user_table to match manager by first or last name",
+      "tables": ["user_table", "designation"],
+      "joins": [
+        "designation d ON u.designation_id = d.designation_id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "manager_name": "mgr.firstname LIKE '%Jerome%' OR mgr.lastname LIKE '%Jerome%'",
+        "active": "u.is_active=1 AND u.is_delete=0 AND d.is_active=1"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, u.stream, u.e_mail, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager FROM user_table u JOIN designation d ON u.designation_id = d.designation_id JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND d.is_active=1 AND (mgr.firstname LIKE '%Jerome%' OR mgr.lastname LIKE '%Jerome%') ORDER BY u.firstname"
+    },
+    {
+      "id": "not_reviewed_employees",
+      "intent": "employees_not_reviewed",
+      "prompt": "List employees who have not been reviewed in the last 6 months",
+      "business_meaning": "Employees with no manager remarks (remarks_table) in the past 6 months — LEFT JOIN with date-bounded ON clause, HAVING last_reviewed_at IS NULL",
+      "tables": ["user_table", "designation", "remarks_table"],
+      "joins": [
+        "designation d ON u.designation_id = d.designation_id",
+        "remarks_table rt ON u.employee_id = rt.user_id AND rt.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)"
+      ],
+      "filters": {
+        "reviewed": "HAVING MAX(rt.created_at) IS NULL",
+        "active": "u.is_active=1 AND u.is_delete=0 AND d.is_active=1"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, u.stream, MAX(rt.created_at) AS last_reviewed_at FROM user_table u JOIN designation d ON u.designation_id = d.designation_id LEFT JOIN remarks_table rt ON u.employee_id = rt.user_id AND rt.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) WHERE u.is_active=1 AND u.is_delete=0 AND d.is_active=1 GROUP BY u.employee_id, u.firstname, u.lastname, d.designation_name, u.stream HAVING last_reviewed_at IS NULL ORDER BY u.stream, u.firstname"
+    },
+    {
+      "id": "comprehensive_kra_report",
+      "intent": "comprehensive_kra_feedback_compliance",
+      "prompt": "Provide the last 1 year report for employee ID VT136, including feedback, compliance, and KRA details",
+      "business_meaning": "Complete KRA summary for a given employee_id — goals, performance_rating, manager feedback, employee self-assessment, compliance status, reporting manager — last 1 year",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status", "remarks_table", "remarks_threads"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id",
+        "remarks_table rt ON ugm.goal_id = rt.goal_id",
+        "user_table m ON rt.given_by = m.employee_id",
+        "remarks_threads r ON r.goal_id = ugm.goal_id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "employee_id": "u.employee_id = 'VT136'",
+        "date": "ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date, rt.remarks AS manager_feedback, rt.performance_rating, CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by, r.remark_text AS employee_feedback, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id LEFT JOIN user_table m ON rt.given_by = m.employee_id LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND u.employee_id = 'VT136' AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) ORDER BY ugm.target_date"
+    },
+    {
+      "id": "kra_list_all_goals",
+      "intent": "kra_goal_list",
+      "prompt": "List all KRA goals assigned to employees",
+      "business_meaning": "All active KRA goal assignments per employee — one row per goal, no aggregation, with goal description, status, target date, and assigned date",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id"
+      ],
+      "filters": {
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 ORDER BY u.firstname, ugm.target_date"
+    },
+    {
+      "id": "compliance_report_department",
+      "intent": "compliance_report",
+      "prompt": "Show compliance report — employees who completed their KRA goals this year",
+      "business_meaning": "Count of employees and completed goals per department (u.stream) where status = Completed — department-wise compliance aggregate",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id"
+      ],
+      "filters": {
+        "status": "s.status_name = 'Completed'",
+        "grouping": "GROUP BY u.stream ORDER BY compliant_employees DESC"
+      },
+      "sql_pattern": "SELECT u.stream AS department, COUNT(DISTINCT ugm.employee_id) AS compliant_employees, COUNT(ugm.id) AS completed_goals FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND s.status_name = 'Completed' GROUP BY u.stream ORDER BY compliant_employees DESC"
+    },
+    {
+      "id": "kra_by_manager",
+      "intent": "kra_report_by_manager",
+      "prompt": "Show KRA report grouped by manager — list all goals under each manager",
+      "business_meaning": "KRA goals with reporting_manager as the first/leading column — manager-first view showing all employees and goals under each manager, self-join on user_table for manager display name",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1",
+        "order": "ORDER BY reporting_manager, u.firstname"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager, CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, u.stream AS department, mg.goal_desc AS goal_name, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 ORDER BY reporting_manager, u.firstname"
+    },
+    {
+      "id": "kra_pending_approval",
+      "intent": "kra_pending_approval",
+      "prompt": "Show KRA goals pending approval — goals submitted but not yet actioned",
+      "business_meaning": "KRA goals in a pending state — assigned_by (approver) as first column, then reporting_manager, to show the full approval chain",
+      "tables": ["user_goal_mapping", "user_table", "designation", "master_goals", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "master_goals mg ON ugm.goal_id = mg.goal_id",
+        "status s ON ugm.status_id = s.id",
+        "user_table assigner ON ugm.assigned_by = assigner.employee_id",
+        "user_table mgr ON u.reporting_manager = mgr.employee_id"
+      ],
+      "filters": {
+        "status": "s.status_name LIKE '%Pending%'",
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(assigner.firstname),' ',TRIM(assigner.lastname)) AS assigned_by, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager, CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, u.stream AS department, mg.goal_desc AS goal_name, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN user_table assigner ON ugm.assigned_by = assigner.employee_id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND s.status_name LIKE '%Pending%' ORDER BY assigned_by, u.firstname"
+    }
+  ]
+}

@@ -134,6 +134,9 @@ class IntentDetectorAgent:
         r"filter\s+(by|for|on|to)|filter\s+(?!redirect)"
         r"|sort\s+by|order\s+by|group\s+by|"
         r"only\s+show|show\s+only|just\s+show|"
+        r"show\s+(?:me\s+)?(?:data|results?|report)\s+only|"
+        r"show\s+only\s+for|data\s+only\s+for|results?\s+only\s+for|"
+        r"show\s+(?:me\s+)?(?:data|results?|info(?:rmation)?)\s+(?:only\s+)?for\s+\w|"
         r"with\s+\w|and\s+also|now\s+(show|add|include|filter|sort|group)|"
         r"update\s+(the\s+)?(report|query|result)|change\s+(the\s+)?(report|query)|"
         r"narrow\s+(down|to|by)|limit\s+to|break\s+down\s+by|"
@@ -188,6 +191,36 @@ class IntentDetectorAgent:
             "enriched_prompt": message,
             "extracted_filters": {},
             "reasoning": "Master data lookup — forced to clear without LLM classification",
+        }
+
+    # ── KRA report keyword detection — always clear ───────────────────────────
+    _KRA_REPORT_RE = re.compile(
+        r"\b("
+        r"kra|goal|goals|compliance|non[\s\-]?compliance|non[\s\-]?complian[ct]"
+        r"|appraisal|appraisals|performance|feedback|report|reports"
+        r"|rating|ratings|designation|designation[\s\-]wise"
+        r"|employee(s)?|reportee(s)?|direct\s+report(s|ee(s)?)?"
+        r"|pending|approval|approved|submitted|assigned"
+        r"|target|target\s+date|completion|incomplete|completed|in\s+progress"
+        r"|department[\s\-]wise|stream[\s\-]wise|skill(s)?|certification(s)?|badge(s)?"
+        r"|productivity|objective(s)?|okr|review(s)?|reviewed"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    def _is_kra_report_query(self, message: str) -> bool:
+        return bool(self._KRA_REPORT_RE.search(message))
+
+    def _kra_report_response(self, message: str) -> Dict[str, Any]:
+        return {
+            "track": "clear",
+            "confidence": 1.0,
+            "greeting_message": "",
+            "off_topic_reason": None,
+            "polite_block_message": None,
+            "enriched_prompt": message,
+            "extracted_filters": {},
+            "reasoning": "KRA report keyword matched — forced clear without LLM classification",
         }
 
     # ── Named-person detection ────────────────────────────────────────────────
@@ -254,7 +287,12 @@ class IntentDetectorAgent:
             logger.info("[intent_agent] continuation shortcut: %s", user_message[:80])
             return self._continuation_response(user_message)
 
-        # ── Shortcut 3: named person already in query → always clear ──────────
+        # ── Shortcut 3: KRA report keyword → always clear (before LLM) ───────
+        if self._is_kra_report_query(user_message):
+            logger.info("[intent_agent] kra-keyword shortcut: %s", user_message[:80])
+            return self._kra_report_response(user_message)
+
+        # ── Shortcut 4: named person already in query → always clear ──────────
         if self._is_named_person_query(user_message):
             logger.info("[intent_agent] named-person shortcut: %s", user_message[:80])
             return {
