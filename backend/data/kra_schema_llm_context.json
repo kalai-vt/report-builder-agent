@@ -1517,7 +1517,7 @@
         }
       ],
       "recommended_filters": [],
-      "llm_usage_hint": "Stores performance ratings and manager remarks on employee goals. Use for: performance rating reports, appraisal remarks, rating summary. JOIN chain: FROM remarks_table rt JOIN user_table u ON rt.user_id = u.employee_id JOIN master_goals mg ON rt.goal_id = mg.goal_id. Key columns: performance_rating (numeric), remarks (text), remark_year, remark_month, given_by (who gave the rating)."
+      "llm_usage_hint": "⚠ MANAGER FEEDBACK on employee goals. `remarks` = the manager's comment/remark text. `given_by` = the manager's employee_id who submitted the remark (NOT the employee). JOIN on goal_id: LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id. To display manager name: LEFT JOIN user_table m ON rt.given_by = m.employee_id → alias as feedback_given_by. NEVER label rt.remarks as employee_feedback — it is the MANAGER's remark. NEVER join user_table via u.reporting_manager and call it feedback. Key columns: remarks (manager feedback text), performance_rating, given_by (manager employee_id), remark_year, remark_month."
     },
     {
       "table_name": "remarks_threads",
@@ -1600,7 +1600,7 @@
         }
       ],
       "recommended_filters": [],
-      "llm_usage_hint": "Threaded comments/discussions on goals. Use for: feedback threads, goal comment history. JOIN: FROM remarks_threads rt JOIN user_table u ON rt.user_id = u.employee_id. Key columns: remark_text, remark_type, status, by_lead, is_agree, is_approve."
+      "llm_usage_hint": "⚠ EMPLOYEE FEEDBACK / SELF-ASSESSMENT on goals. `remark_text` = the employee's own comment or self-assessment reply on their goal. This is the employee side of the feedback loop — NOT the manager's remark. JOIN on goal_id: LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id → r.remark_text AS employee_feedback. Key columns: remark_text (employee feedback text), remark_type, status, by_lead, is_agree, is_approve."
     },
     {
       "table_name": "rnr_approval_actions",

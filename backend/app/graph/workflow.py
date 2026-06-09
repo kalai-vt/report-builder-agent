@@ -11,6 +11,7 @@ from app.graph.nodes import (
     cache_lookup_node,
     cache_store_node,
     cache_write_node,
+    context_manager_node,
     error_handler_node,
     execution_engine_node,
     greeting_node,
@@ -24,10 +25,13 @@ from app.graph.nodes import (
     off_topic_node,
     prompt_builder_node,
     refresh_execution_node,
+    relationship_clarification_node,
+    relationship_classifier_node,
     response_node,
     result_formatter_node,
     route_after_execution,
     route_after_intent_detection,
+    route_after_relationship_classification,
     route_after_sql_test,
     route_after_validation,
     sql_agent_node,
@@ -59,6 +63,9 @@ def build_workflow():
     graph.add_node("intent_detector",            intent_detector_node)
     graph.add_node("greeting",                   greeting_node)
     graph.add_node("off_topic",                  off_topic_node)
+    graph.add_node("relationship_classifier",    relationship_classifier_node)
+    graph.add_node("relationship_clarification", relationship_clarification_node)
+    graph.add_node("context_manager",            context_manager_node)
     graph.add_node("prompt_builder",             prompt_builder_node)
     graph.add_node("llm",                        llm_node)
     graph.add_node("sql_agent",                  sql_agent_node)
@@ -86,17 +93,31 @@ def build_workflow():
     )
 
     # ── Intent routing (Track A / B / C) ─────────────────────────────────────
+    # "prompt_builder" from route_after_intent_detection now routes to
+    # relationship_classifier instead of directly to prompt_builder.
     graph.add_conditional_edges(
         "intent_detector",
         route_after_intent_detection,
         {
             "greeting":       "greeting",
             "off_topic":      "off_topic",
-            "prompt_builder": "prompt_builder",
+            "prompt_builder": "relationship_classifier",
         },
     )
     graph.add_edge("greeting",  END)
     graph.add_edge("off_topic", END)
+
+    # ── Relationship classification → clarify or proceed ─────────────────────
+    graph.add_conditional_edges(
+        "relationship_classifier",
+        route_after_relationship_classification,
+        {
+            "clarify": "relationship_clarification",
+            "proceed": "context_manager",
+        },
+    )
+    graph.add_edge("relationship_clarification", END)
+    graph.add_edge("context_manager", "prompt_builder")
 
     # ── SQL generation pipeline ───────────────────────────────────────────────
     graph.add_edge("prompt_builder", "llm")
@@ -178,6 +199,7 @@ def _base_state(extra: Dict[str, Any]) -> AgentState:
         "user_query":          "",
         "user_role":           "employee",
         "session_id":          "",
+        "chat_session_id":     "",
         "debug":               False,
         "schema":              "",
         "memory_context":      "",
@@ -202,6 +224,11 @@ def _base_state(extra: Dict[str, Any]) -> AgentState:
         "off_topic_message":   "",
         "extracted_filters":   {},
         "enriched_prompt":     "",
+        # Relationship classification
+        "relationship_type":       "new_request",
+        "relationship_confidence": 0.0,
+        "clarification_question":  "",
+        "active_report_context":   {},
         "refresh_mode":          False,
         "refreshed_at":          "",
         # SQL test execution
@@ -251,19 +278,21 @@ async def run_intent_report(
     query: str,
     user_role: str = "employee",
     session_id: str = "",
+    chat_session_id: str = "",
     debug: bool = False,
     page: int = 1,
     page_size: int = 0,
 ) -> Dict[str, Any]:
     """Intent-aware entry point used by /report/generate."""
     initial = _base_state({
-        "user_id":   user_id,
-        "user_query": query,
-        "user_role":  user_role,
-        "session_id": session_id,
-        "debug":      debug,
-        "page":       page,
-        "page_size":  page_size or settings.PAGE_SIZE,
+        "user_id":         user_id,
+        "user_query":      query,
+        "user_role":       user_role,
+        "session_id":      session_id,
+        "chat_session_id": chat_session_id,
+        "debug":           debug,
+        "page":            page,
+        "page_size":       page_size or settings.PAGE_SIZE,
     })
     try:
         final: AgentState = await _workflow.ainvoke(initial)
