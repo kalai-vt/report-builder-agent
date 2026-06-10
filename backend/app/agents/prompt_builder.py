@@ -3,10 +3,284 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Detects a non-compliance query WITHOUT any department grouping keyword
+_NON_COMPLIANCE_RE = re.compile(r'\bnon[\s\-]?compli', re.IGNORECASE)
+_GROUPING_RE = re.compile(
+    r'\b(department[\s\-]?wise|by[\s\-]?department|categorized|grouped|summary|count[\s\-]?per)\b',
+    re.IGNORECASE,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Static few-shot reference section — always injected into the system prompt.
+# LLM must use the closest matching example as a SQL template; generate from
+# scratch only when no example matches the user query.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STATIC_FEW_SHOT = """\
+════════════════════════════════════════
+ APPROVED REFERENCE SQL EXAMPLES
+════════════════════════════════════════
+MATCHING RULE:
+  ● If the user query CLOSELY matches an example → use that SQL as your EXACT
+    template.  Change ONLY the variable parts: date, month, year, employee name,
+    employee ID.  Keep ALL JOINs, column aliases, WHERE guards, GROUP BY, and
+    ORDER BY exactly as shown.
+  ● If the user query is UNRELATED to any example → generate SQL from scratch
+    using the DATABASE SCHEMA and SQL GENERATION RULES below.
+
+NON-COMPLIANCE DISAMBIGUATION (CRITICAL — read before generating any non-compliance SQL):
+  "non-compliance report for [month]"                    → Example 1 (employee list, NO GROUP BY)
+  "non-compliance report for [month], department-wise"   → Example 2 (department aggregate, GROUP BY)
+  "non-compliance report for [month], by department"     → Example 2
+  "non-compliance report for [month], categorized"       → Example 2
+  DEFAULT (no grouping word): ALWAYS use Example 1 — individual employee rows, never aggregate.
+
+─── Example 1 ─────────────────────────────────────────────────────────────────
+  Query  : "Provide the non-compliance report for April 2026"
+  Intent : Employee-level list of goals NOT completed in a specific month
+  ⚠ USE THIS when the query has NO grouping words ("department-wise", "by department",
+    "categorized", "summary", "count"). Default non-compliance = employee list.
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, u.stream AS department, mg.goal_desc AS goal_name,
+       s.status_name AS goal_status, ugm.target_date
+FROM user_goal_mapping ugm
+JOIN user_table u    ON ugm.employee_id = u.employee_id
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s   ON ugm.status_id = s.id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND s.status_name != 'Completed'
+  AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
+ORDER BY u.stream, u.firstname
+
+─── Example 2 ─────────────────────────────────────────────────────────────────
+  Query  : "Provide the non-compliance report for April 2026, categorized department-wise"
+  Intent : Aggregate count of non-compliant employees and incomplete goals per department
+  ⚠ USE THIS only when query explicitly contains "department-wise", "by department",
+    "categorized", "grouped by department", "summary", or "count per department".
+  SQL:
+SELECT u.stream AS department,
+       COUNT(DISTINCT ugm.employee_id) AS non_compliant_employees,
+       COUNT(ugm.id) AS incomplete_goals
+FROM user_goal_mapping ugm
+JOIN user_table u    ON ugm.employee_id = u.employee_id
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s   ON ugm.status_id = s.id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND s.status_name != 'Completed'
+  AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
+GROUP BY u.stream
+ORDER BY non_compliant_employees DESC
+
+─── Example 3 ─────────────────────────────────────────────────────────────────
+  Query  : "Share the feedback report for 2026, including inputs from the employee, reporting manager, and HR"
+  Intent : KRA goals with manager feedback, employee self-assessment, and reporting manager name
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+       s.status_name AS goal_status, ugm.target_date, ugm.assigned_date,
+       rt.remarks AS manager_feedback,
+       CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by,
+       r.remark_text AS employee_feedback,
+       CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
+FROM user_goal_mapping ugm
+JOIN user_table u      ON ugm.employee_id = u.employee_id
+JOIN designation d     ON u.designation_id = d.designation_id
+JOIN master_goals mg   ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s     ON ugm.status_id = s.id
+LEFT JOIN remarks_table rt  ON ugm.goal_id = rt.goal_id
+LEFT JOIN user_table m      ON rt.given_by = m.employee_id
+LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id
+LEFT JOIN user_table mgr    ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND YEAR(ugm.assigned_date) = 2026
+ORDER BY u.firstname
+
+─── Example 4 ─────────────────────────────────────────────────────────────────
+  Query  : "Provide the KRA report for the past 1 year for Baskar"
+  Intent : Full KRA + feedback report for an employee matched by first name, last 1 year
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+       s.status_name AS goal_status, ugm.target_date, ugm.assigned_date,
+       rt.remarks AS manager_feedback,
+       CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by,
+       r.remark_text AS employee_feedback,
+       CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
+FROM user_goal_mapping ugm
+JOIN user_table u      ON ugm.employee_id = u.employee_id
+JOIN designation d     ON u.designation_id = d.designation_id
+JOIN master_goals mg   ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s     ON ugm.status_id = s.id
+LEFT JOIN remarks_table rt  ON ugm.goal_id = rt.goal_id
+LEFT JOIN user_table m      ON rt.given_by = m.employee_id
+LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id
+LEFT JOIN user_table mgr    ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND u.firstname LIKE '%Baskar%'
+  AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
+ORDER BY ugm.target_date
+
+─── Example 5 ─────────────────────────────────────────────────────────────────
+  Query  : "Provide the report for the past 1 year for employee ID VT136"
+  Intent : Full KRA + feedback report for a specific employee_id, last 1 year
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+       s.status_name AS goal_status, ugm.target_date, ugm.assigned_date,
+       rt.remarks AS manager_feedback,
+       CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by,
+       r.remark_text AS employee_feedback,
+       CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
+FROM user_goal_mapping ugm
+JOIN user_table u      ON ugm.employee_id = u.employee_id
+JOIN designation d     ON u.designation_id = d.designation_id
+JOIN master_goals mg   ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s     ON ugm.status_id = s.id
+LEFT JOIN remarks_table rt  ON ugm.goal_id = rt.goal_id
+LEFT JOIN user_table m      ON rt.given_by = m.employee_id
+LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id
+LEFT JOIN user_table mgr    ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND u.employee_id = 'VT136'
+  AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
+ORDER BY ugm.target_date
+
+─── Example 6 ─────────────────────────────────────────────────────────────────
+  Query  : "List all employees who directly report to Jerome"
+  Intent : Employees whose reporting_manager matches a given manager name
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, u.stream, u.e_mail,
+       CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
+FROM user_table u
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN user_table mgr  ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND d.is_active=1
+  AND (mgr.firstname LIKE '%Jerome%' OR mgr.lastname LIKE '%Jerome%')
+ORDER BY u.firstname
+
+─── Example 7 ─────────────────────────────────────────────────────────────────
+  Query  : "List employees who have not been reviewed in the last 6 months"
+  Intent : Active employees with no manager remarks (remarks_table) in past 6 months
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, u.stream, MAX(rt.created_at) AS last_reviewed_at
+FROM user_table u
+JOIN designation d ON u.designation_id = d.designation_id
+LEFT JOIN remarks_table rt ON u.employee_id = rt.user_id
+  AND rt.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+WHERE u.is_active=1 AND u.is_delete=0 AND d.is_active=1
+GROUP BY u.employee_id, u.firstname, u.lastname, d.designation_name, u.stream
+HAVING last_reviewed_at IS NULL
+ORDER BY u.stream, u.firstname
+
+─── Example 8 ─────────────────────────────────────────────────────────────────
+  Query  : "Provide the last 1 year report for employee ID VT136, including feedback, compliance, and KRA details"
+  Intent : Comprehensive KRA summary with goals, ratings, manager feedback, compliance, reporting manager
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+       s.status_name AS goal_status, ugm.target_date, ugm.assigned_date,
+       rt.remarks AS manager_feedback, rt.performance_rating,
+       CONCAT(TRIM(m.firstname),' ',TRIM(m.lastname)) AS feedback_given_by,
+       r.remark_text AS employee_feedback,
+       CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager
+FROM user_goal_mapping ugm
+JOIN user_table u      ON ugm.employee_id = u.employee_id
+JOIN designation d     ON u.designation_id = d.designation_id
+JOIN master_goals mg   ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s     ON ugm.status_id = s.id
+LEFT JOIN remarks_table rt  ON ugm.goal_id = rt.goal_id
+LEFT JOIN user_table m      ON rt.given_by = m.employee_id
+LEFT JOIN remarks_threads r ON r.goal_id = ugm.goal_id
+LEFT JOIN user_table mgr    ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND u.employee_id = 'VT136'
+  AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
+ORDER BY ugm.target_date
+
+─── Example 9 ─────────────────────────────────────────────────────────────────
+  Query  : "List all KRA goals assigned to employees"
+  Intent : All active KRA assignments — one row per goal, no aggregation
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, mg.goal_desc AS goal_name, ugm.goal_desc AS custom_goal,
+       s.status_name AS goal_status, ugm.target_date, ugm.assigned_date
+FROM user_goal_mapping ugm
+JOIN user_table u    ON ugm.employee_id = u.employee_id
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s   ON ugm.status_id = s.id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+ORDER BY u.firstname, ugm.target_date
+
+─── Example 10 ────────────────────────────────────────────────────────────────
+  Query  : "Show compliance report — employees who completed their KRA goals this year"
+  Intent : Department-wise count of employees and completed goals (status = Completed)
+  SQL:
+SELECT u.stream AS department,
+       COUNT(DISTINCT ugm.employee_id) AS compliant_employees,
+       COUNT(ugm.id) AS completed_goals
+FROM user_goal_mapping ugm
+JOIN user_table u    ON ugm.employee_id = u.employee_id
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s   ON ugm.status_id = s.id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND s.status_name = 'Completed'
+GROUP BY u.stream
+ORDER BY compliant_employees DESC
+
+─── Example 11 ────────────────────────────────────────────────────────────────
+  Query  : "Show KRA report grouped by manager — list all goals under each manager"
+  Intent : Manager-first view of all KRA goals, self-join for manager display name
+  SQL:
+SELECT CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager,
+       CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, u.stream AS department,
+       mg.goal_desc AS goal_name, s.status_name AS goal_status,
+       ugm.target_date, ugm.assigned_date
+FROM user_goal_mapping ugm
+JOIN user_table u    ON ugm.employee_id = u.employee_id
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s   ON ugm.status_id = s.id
+LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+ORDER BY reporting_manager, u.firstname
+
+─── Example 12 ────────────────────────────────────────────────────────────────
+  Query  : "Show KRA goals pending approval — goals submitted but not yet actioned"
+  Intent : Goals in a pending state with full approval chain (assigned_by + reporting_manager)
+  SQL:
+SELECT CONCAT(TRIM(assigner.firstname),' ',TRIM(assigner.lastname)) AS assigned_by,
+       CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager,
+       CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       d.designation_name, u.stream AS department,
+       mg.goal_desc AS goal_name, s.status_name AS goal_status,
+       ugm.target_date, ugm.assigned_date
+FROM user_goal_mapping ugm
+JOIN user_table u    ON ugm.employee_id = u.employee_id
+JOIN designation d   ON u.designation_id = d.designation_id
+JOIN master_goals mg ON ugm.goal_id = mg.goal_id
+LEFT JOIN status s   ON ugm.status_id = s.id
+LEFT JOIN user_table assigner ON ugm.assigned_by = assigner.employee_id
+LEFT JOIN user_table mgr      ON u.reporting_manager = mgr.employee_id
+WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
+  AND s.status_name LIKE '%Pending%'
+ORDER BY assigned_by, u.firstname
+
+════════════════════════════════════════
+"""
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert MySQL analyst for a KRA (Key Result Area) analytics system.
 Your job is to generate safe, precise SQL SELECT queries from natural language.
 
+{few_shot}
 ════════════════════════════════════════
  DATABASE SCHEMA
 ════════════════════════════════════════
@@ -307,35 +581,9 @@ PERIOD / MONTH TERMS:
        JOIN designation d ON u.designation_id = d.designation_id
        WHERE u.reporting_manager = :employee_id AND u.is_active=1 AND u.is_delete=0 AND d.is_active=1
 
-    j) NON-COMPLIANCE REPORT (goals not completed, department-wise summary):
-       SELECT u.stream AS department,
-              COUNT(DISTINCT ugm.employee_id) AS non_compliant_employees,
-              COUNT(ugm.id) AS incomplete_goals
-       FROM user_goal_mapping ugm
-       JOIN user_table u    ON ugm.employee_id = u.employee_id
-       JOIN designation d   ON u.designation_id = d.designation_id
-       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
-       LEFT JOIN status s   ON ugm.status_id = s.id
-       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
-         AND s.status_name != 'Completed'
-       -- Month/period filter: AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
-       GROUP BY u.stream
-       ORDER BY non_compliant_employees DESC
-
-    k) NON-COMPLIANCE DETAILED LIST (employee-level, with department column):
-       SELECT u.stream AS department,
-              CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
-              d.designation_name, mg.goal_desc AS goal_name,
-              s.status_name AS goal_status, ugm.target_date
-       FROM user_goal_mapping ugm
-       JOIN user_table u    ON ugm.employee_id = u.employee_id
-       JOIN designation d   ON u.designation_id = d.designation_id
-       JOIN master_goals mg ON ugm.goal_id = mg.goal_id
-       LEFT JOIN status s   ON ugm.status_id = s.id
-       WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
-         AND s.status_name != 'Completed'
-       -- Month/period filter: AND YEAR(ugm.target_date) = 2026 AND MONTH(ugm.target_date) = 4
-       ORDER BY u.stream, u.firstname
+    j) NON-COMPLIANCE — see APPROVED REFERENCE SQL EXAMPLES above:
+       Example 1 = employee-level list (default, no GROUP BY)
+       Example 2 = department aggregate (only when "department-wise" / "categorized" is stated)
 
     l) COMPLIANCE REPORT (goals completed, department-wise summary):
        SELECT u.stream AS department,
@@ -374,6 +622,7 @@ PERIOD / MONTH TERMS:
        -- Employee filter: AND u.employee_id = 'VT136'  OR  AND u.firstname LIKE '%Name%'
        -- Date filter   : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
 
+
     n) KRA BY MANAGER (use when user says "by manager", "manager-wise", "per manager", "under each manager"):
        -- Manager is the FIRST column; employees are listed under their manager
        -- Do NOT use GROUP BY unless user explicitly asks for a count/summary
@@ -389,12 +638,9 @@ PERIOD / MONTH TERMS:
        LEFT JOIN status s   ON ugm.status_id = s.id
        LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
        WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
-       -- Status filter : AND s.status_name != 'Completed'  (if user adds a status filter)
-       -- Date filter   : AND ugm.target_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
        ORDER BY manager, u.firstname
 
     o) KRA PENDING APPROVAL (use when user says "pending approval", "awaiting approval", "submitted for approval"):
-       -- Shows who assigned the goal (assigned_by) as the approver context
        -- Filter: s.status_name LIKE '%Pending%'
        -- NEVER use approval_history for KRA goals; NEVER add approval_status/approved_by/approval_date columns
        SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
@@ -413,8 +659,6 @@ PERIOD / MONTH TERMS:
        LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id
        WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1
          AND s.status_name LIKE '%Pending%'
-       -- Employee filter: AND u.firstname LIKE '%Name%'
-       -- Date filter    : AND ugm.assigned_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
        ORDER BY ugm.assigned_date DESC
 
     i) RNR NOMINATIONS:
@@ -444,19 +688,38 @@ PERIOD / MONTH TERMS:
 }}
 """
 
-FOLLOWUP_INSTRUCTION = """
+FOLLOWUP_INSTRUCTION_TEMPLATE = """\
+
+════════════════════════════════════════
+ FOLLOW-UP MODIFICATION — BASE QUERY IS:
+════════════════════════════════════════
+{base_sql}
+
+════════════════════════════════════════
+ MODIFICATION RULES (read carefully)
+════════════════════════════════════════
+  1. START from the BASE QUERY above — do NOT write a new query from scratch.
+  2. ADD / REMOVE / CHANGE only what the user explicitly asked for.
+  3. Keep ALL existing SELECT columns, JOINs, and WHERE guards unchanged.
+  4. Name filter → append: AND (u.firstname LIKE '%Name%' OR u.lastname LIKE '%Name%')
+     Employee ID filter → append: AND u.employee_id = 'ID'
+  5. Column add → append the column to SELECT (use exact name from DATABASE SCHEMA).
+  6. Column remove → drop only that column from SELECT.
+  7. Use EXACT column names from the DATABASE SCHEMA (Rule 12).
+"""
+
+FOLLOWUP_INSTRUCTION_FALLBACK = """\
+
 ════════════════════════════════════════
  FOLLOW-UP MODIFICATION (READ CAREFULLY)
 ════════════════════════════════════════
 The user is MODIFYING a previous report.
-Find the most recent "[SQL used: ...]" line in the CONVERSATION CONTEXT above — that is your BASE query.
+The base query is the most recent [SQL used: ...] in the CONVERSATION CONTEXT above.
 
-Rules:
-  1. KEEP all existing SELECT columns from the base SQL unchanged.
+  1. Do NOT rewrite from scratch — start from that base SQL.
   2. ADD / REMOVE / CHANGE only what the user explicitly asked for.
-  3. Do NOT rewrite the query from scratch — start from the base SQL.
-  4. Use EXACT column names from the DATABASE SCHEMA above (Rule 12).
-     For email: use u.e_mail — NOT u.email.
+  3. Keep ALL existing SELECT columns, JOINs, and WHERE guards unchanged.
+  4. Use EXACT column names from the DATABASE SCHEMA (Rule 12).
 """
 
 ACTIVE_CONTEXT_SECTION = """
@@ -499,11 +762,20 @@ def extract_column_hint(error: str) -> str:
     )
 
 
+# Extracts the most recent SQL from "[SQL used: ...]" lines in memory context
+_SQL_USED_RE = re.compile(r"\[SQL used:\s*(.*?)\]", re.DOTALL)
+
+
+def _extract_last_sql(memory_context: str) -> str:
+    matches = _SQL_USED_RE.findall(memory_context)
+    return matches[-1].strip() if matches else ""
+
+
 class PromptBuilder:
+
     def build_prompt(
         self,
         user_query: str,
-        user_id: str,
         schema_string: str,
         memory_context: str = "",
         retry_feedback: str = "",
@@ -512,27 +784,36 @@ class PromptBuilder:
     ) -> str:
         memory_section = memory_context if memory_context else "No prior conversation."
 
-        # Follow-up is determined exclusively by the relationship classifier.
-        # Never infer it from raw SQL presence in memory (that caused Bug 1).
+        # Follow-up determined exclusively by the relationship classifier.
         is_followup = (relationship_type == "followup")
 
-        # Escape any literal braces in untrusted content before str.format()
         system = SYSTEM_PROMPT_TEMPLATE.format(
+            few_shot=_STATIC_FEW_SHOT,
             schema=schema_string.replace("{", "{{").replace("}", "}}"),
             memory_context=memory_section.replace("{", "{{").replace("}", "}}"),
         )
 
+        # Build follow-up section: use active_report_context when available (structured),
+        # then inject the actual base SQL so the LLM never has to "find" it in memory.
         followup_section = ""
         if is_followup:
             ctx = active_report_context or {}
-            # Only inject active context section when we have meaningful data
             if ctx.get("generated_sql") or ctx.get("last_query"):
                 followup_section = ACTIVE_CONTEXT_SECTION.format(
                     report_type=ctx.get("report_type", "previous report"),
                     last_query=ctx.get("last_query", "").replace("{", "{{").replace("}", "}}"),
                     generated_sql=ctx.get("generated_sql", "").replace("{", "{{").replace("}", "}}"),
                 )
-            followup_section += FOLLOWUP_INSTRUCTION
+                base_sql = ctx.get("generated_sql", "")
+            else:
+                base_sql = _extract_last_sql(memory_section)
+
+            if base_sql:
+                followup_section += FOLLOWUP_INSTRUCTION_TEMPLATE.format(
+                    base_sql=base_sql.replace("{", "{{").replace("}", "}}")
+                )
+            else:
+                followup_section += FOLLOWUP_INSTRUCTION_FALLBACK
 
         retry_section = ""
         if retry_feedback:
@@ -540,10 +821,21 @@ class PromptBuilder:
                 retry_feedback=retry_feedback.replace("{", "{{").replace("}", "}}")
             )
 
-        prompt = f"{system}{followup_section}\n{retry_section}\nUSER QUERY: {user_query}"
+        # Last-line override: non-compliance without grouping → always employee list
+        query_hint = ""
+        if _NON_COMPLIANCE_RE.search(user_query) and not _GROUPING_RE.search(user_query):
+            query_hint = (
+                "\n⚠ INSTRUCTION FOR THIS QUERY: The user asked for a non-compliance report "
+                "WITHOUT any grouping keyword (no 'department-wise', 'by department', 'categorized', "
+                "'summary', or 'count'). You MUST generate an EMPLOYEE-LEVEL LIST — "
+                "individual rows per employee per goal. NO GROUP BY. NO COUNT. "
+                "Use EXAMPLE 1 from APPROVED REFERENCE SQL EXAMPLES as your exact template.\n"
+            )
+
+        prompt = f"{system}{followup_section}\n{retry_section}{query_hint}\nUSER QUERY: {user_query}"
         logger.debug(
-            "Built prompt (%d chars) relationship=%s retry=%s",
-            len(prompt), relationship_type, bool(retry_feedback),
+            "Built prompt (%d chars) relationship=%s followup=%s retry=%s",
+            len(prompt), relationship_type, is_followup, bool(retry_feedback),
         )
         return prompt
 
