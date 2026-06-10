@@ -3,13 +3,17 @@ import useStore from '../store/useStore'
 import { exportToCSV, exportToExcel, exportToPDF } from '../utils/exportUtils'
 
 export default function ExportButtons() {
-  const { filteredData, columns, currentPrompt } = useStore()
-  const [saving, setSaving] = useState(false)
+  const { filteredFullData, filteredData, columns, currentPrompt, isLoadingFullData } = useStore()
   const [saveName, setSaveName] = useState('')
   const [showSaveInput, setShowSaveInput] = useState(false)
   const saveReport = useStore((s) => s.saveReport)
 
   if (!filteredData.length) return null
+
+  // filteredFullData is the complete dataset (all pages, post-filter) — always use it for export.
+  // It is set to page-1 rows immediately on load, then silently extended as background pages arrive.
+  const exportData = filteredFullData.length > 0 ? filteredFullData : filteredData
+  const exportCount = exportData.length
 
   const filename = `report_${Date.now()}`
   const title = currentPrompt ? currentPrompt.slice(0, 60) : 'AI Report Builder'
@@ -21,14 +25,38 @@ export default function ExportButtons() {
     setShowSaveInput(false)
   }
 
+  const btnBase =
+    'inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border transition-colors'
+  const btnReady = `${btnBase} border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300`
+  const btnLoading = `${btnBase} border-gray-100 text-gray-400 cursor-wait`
+
   return (
     <div className="flex items-center gap-2 flex-wrap">
-      {/* Export buttons */}
-      <span className="text-xs text-gray-400 mr-1">Export:</span>
+      {/* Row count / loading label */}
+      <span className="text-xs text-gray-400 mr-1 flex items-center gap-1">
+        Export
+        {isLoadingFullData ? (
+          <>
+            <svg className="w-3 h-3 animate-spin text-gray-400" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+            <span>({exportCount.toLocaleString()} rows, loading more…)</span>
+          </>
+        ) : (
+          <span>({exportCount.toLocaleString()} rows):</span>
+        )}
+      </span>
 
+      {/* CSV */}
       <button
-        onClick={() => exportToCSV(filteredData, columns, filename)}
-        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors"
+        onClick={() => exportToCSV(exportData, columns, filename)}
+        className={isLoadingFullData ? btnLoading : btnReady}
+        title={
+          isLoadingFullData
+            ? `Loading full dataset… (${exportCount.toLocaleString()} rows ready so far)`
+            : `Export all ${exportCount.toLocaleString()} rows as CSV`
+        }
       >
         <svg className="w-3.5 h-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -37,9 +65,15 @@ export default function ExportButtons() {
         CSV
       </button>
 
+      {/* Excel */}
       <button
-        onClick={() => exportToExcel(filteredData, columns, filename)}
-        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors"
+        onClick={() => exportToExcel(exportData, columns, filename)}
+        className={isLoadingFullData ? btnLoading : btnReady}
+        title={
+          isLoadingFullData
+            ? `Loading full dataset… (${exportCount.toLocaleString()} rows ready so far)`
+            : `Export all ${exportCount.toLocaleString()} rows as Excel`
+        }
       >
         <svg className="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -48,9 +82,15 @@ export default function ExportButtons() {
         Excel
       </button>
 
+      {/* PDF */}
       <button
-        onClick={() => exportToPDF(filteredData, columns, filename, title)}
-        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors"
+        onClick={() => exportToPDF(exportData, columns, filename, title)}
+        className={isLoadingFullData ? btnLoading : btnReady}
+        title={
+          isLoadingFullData
+            ? `Loading full dataset… (${exportCount.toLocaleString()} rows ready so far)`
+            : `Export all ${exportCount.toLocaleString()} rows as PDF`
+        }
       >
         <svg className="w-3.5 h-3.5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}

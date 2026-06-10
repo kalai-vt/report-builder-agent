@@ -8,6 +8,7 @@ from sqlalchemy.exc import OperationalError
 from app.agents.intent_agent import intent_agent
 from app.agents.llm_agent import llm_agent
 from app.agents.prompt_builder import prompt_builder, extract_column_hint
+from app.agents.relationship_classifier import relationship_classifier
 from app.agents.sql_agent import sql_refinement_agent
 from app.cache.query_cache import QueryCache
 from app.cache.redis_cache import sql_cache
@@ -16,6 +17,7 @@ from app.db.connection import db_manager
 from app.db.schema_manager import schema_manager
 from app.graph.state import AgentState
 from app.memory.conversation_memory import memory_manager
+from app.services.context_manager import active_report_context_manager
 from app.services.filter_recommender import filter_recommender
 from app.validators.sql_validator import ValidationStatus, sql_validator
 
@@ -104,19 +106,24 @@ def cache_store_node(state: AgentState) -> Dict[str, Any]:
 
 def load_context_node(state: AgentState) -> Dict[str, Any]:
     user_id = state["user_id"]
+    chat_session_id = state.get("chat_session_id", "")
     t0 = time.time()
 
     schema_str = schema_manager.get_schema_string()
-    memory_ctx = memory_manager.get_context_string(user_id)
+    memory_ctx = memory_manager.get_context_string(user_id, chat_session_id=chat_session_id)
 
     step = {
         "node": "load_context",
         "status": "success",
         "schema_tables": len(schema_manager.get_schema()),
         "has_memory": bool(memory_ctx),
+        "chat_session_id": chat_session_id[:16] if chat_session_id else "",
         "duration_ms": round((time.time() - t0) * 1000, 1),
     }
-    logger.info(f"[load_context] user={user_id} tables={step['schema_tables']}")
+    logger.info(
+        "[load_context] user=%s session=%s tables=%d",
+        user_id, chat_session_id[:16] if chat_session_id else "none", step["schema_tables"],
+    )
     return {
         "schema": schema_str,
         "memory_context": memory_ctx,
@@ -147,18 +154,22 @@ def prompt_builder_node(state: AgentState) -> Dict[str, Any]:
         schema_string=schema_str,
         memory_context=state.get("memory_context", ""),
         retry_feedback=state.get("retry_feedback", ""),
+        relationship_type=state.get("relationship_type", "new_request"),
+        active_report_context=state.get("active_report_context", {}),
     )
     step = {
         "node": "prompt_builder",
         "status": "success",
         "prompt_chars": len(built_prompt),
         "retrieved_tables": retrieved_tables,
+        "relationship_type": state.get("relationship_type", "new_request"),
         "is_retry": bool(state.get("retry_feedback")),
         "duration_ms": round((time.time() - t0) * 1000, 1),
     }
     logger.info(
-        "[prompt_builder] user=%s tables=%s chars=%d retry=%s",
-        state["user_id"], retrieved_tables, len(built_prompt), step["is_retry"],
+        "[prompt_builder] user=%s tables=%s chars=%d relationship=%s retry=%s",
+        state["user_id"], retrieved_tables, len(built_prompt),
+        step["relationship_type"], step["is_retry"],
     )
     return {"prompt": built_prompt, "steps": _steps(state) + [step]}
 
@@ -449,8 +460,10 @@ def result_formatter_node(state: AgentState) -> Dict[str, Any]:
 def memory_store_node(state: AgentState) -> Dict[str, Any]:
     t0 = time.time()
     user_id = state["user_id"]
+    chat_session_id = state.get("chat_session_id", "")
     formatted = state.get("formatted_result", {})
     sql = state.get("refined_sql", "")
+    final_sql = sql or formatted.get("sql_query", "")
 
     row_count = formatted.get("row_count", 0)
     explanation = formatted.get("explanation", "Query completed.")
@@ -461,15 +474,28 @@ def memory_store_node(state: AgentState) -> Dict[str, Any]:
         user_id=user_id,
         user_message=state["user_query"],
         assistant_message=assistant_msg,
-        sql_query=sql or formatted.get("sql_query", ""),
+        sql_query=final_sql,
+        chat_session_id=chat_session_id,
     )
+
+    # Keep active report context current so the next follow-up has a fresh base SQL
+    if final_sql:
+        active_report_context_manager.update(
+            user_id,
+            chat_session_id,
+            generated_sql=final_sql,
+            last_query=state.get("user_query", ""),
+            dimensions=formatted.get("dimensions", []),
+        )
 
     step = {
         "node": "memory_store",
         "status": "success",
+        "chat_session_id": chat_session_id[:16] if chat_session_id else "",
         "duration_ms": round((time.time() - t0) * 1000, 1),
     }
-    logger.info(f"[memory_store] user={user_id} stored interaction")
+    logger.info("[memory_store] user=%s session=%s stored interaction",
+                user_id, chat_session_id[:16] if chat_session_id else "none")
     return {"steps": _steps(state) + [step]}
 
 
@@ -668,6 +694,115 @@ def increment_retry_test_node(state: AgentState) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
+# Node: Relationship Classifier
+# Runs after intent_detector (track==clear).
+# Determines whether the current query is a
+# follow-up refinement or a new unrelated request.
+# ─────────────────────────────────────────────
+
+def relationship_classifier_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    user_query = state.get("user_query", "")
+    memory_ctx = state.get("memory_context", "")
+
+    result = relationship_classifier.classify(
+        current_query=user_query,
+        previous_context=memory_ctx,
+    )
+
+    duration = round((time.time() - t0) * 1000, 1)
+    step = {
+        "node": "relationship_classifier",
+        "status": "success",
+        "relationship_type": result["relationship_type"],
+        "confidence": result["confidence"],
+        "duration_ms": duration,
+    }
+    logger.info(
+        "[relationship_classifier] user=%s type=%s confidence=%.2f | %s",
+        state["user_id"], result["relationship_type"], result["confidence"],
+        result.get("reasoning", "")[:80],
+    )
+    return {
+        "relationship_type": result["relationship_type"],
+        "relationship_confidence": result["confidence"],
+        "clarification_question": result.get("clarification_question") or "",
+        "steps": _steps(state) + [step],
+    }
+
+
+# ─────────────────────────────────────────────
+# Node: Context Manager
+# Runs after relationship_classifier.
+# Resets or loads the active report context
+# depending on whether this is a new request
+# or a follow-up.
+# ─────────────────────────────────────────────
+
+def context_manager_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    user_id = state["user_id"]
+    chat_session_id = state.get("chat_session_id", "")
+    rel_type = state.get("relationship_type", "new_request")
+
+    if rel_type == "new_request":
+        active_report_context_manager.reset(user_id, chat_session_id)
+        ctx = {}
+        action = "reset"
+    else:
+        # followup — read the stored context so prompt_builder can inject it
+        ctx = active_report_context_manager.get(user_id, chat_session_id)
+        action = "loaded"
+
+    step = {
+        "node": "context_manager",
+        "status": "success",
+        "action": action,
+        "has_sql": bool(ctx.get("generated_sql")),
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(
+        "[context_manager] user=%s session=%s action=%s has_sql=%s",
+        user_id, chat_session_id[:16] if chat_session_id else "none",
+        action, bool(ctx.get("generated_sql")),
+    )
+    return {
+        "active_report_context": ctx,
+        "steps": _steps(state) + [step],
+    }
+
+
+# ─────────────────────────────────────────────
+# Node: Relationship Clarification
+# Runs when relationship_type == "uncertain".
+# Returns a clarification question to the user
+# without generating any SQL.
+# ─────────────────────────────────────────────
+
+def relationship_clarification_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    question = state.get("clarification_question") or (
+        "Are you referring to the previous report, or would you like to start a new report?"
+    )
+    formatted = {
+        "status": "clarification_needed",
+        "message": question,
+        "follow_up_question": question,
+        "follow_up_options": ["Continue with previous report", "Start a new report"],
+        "data": [],
+        "row_count": 0,
+        "execution_time": 0.0,
+    }
+    step = {
+        "node": "relationship_clarification",
+        "status": "success",
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info("[relationship_clarification] user=%s asking: %s", state["user_id"], question[:80])
+    return {"formatted_result": formatted, "steps": _steps(state) + [step]}
+
+
+# ─────────────────────────────────────────────
 # Conditional Edge Functions
 # ─────────────────────────────────────────────
 
@@ -711,6 +846,13 @@ def route_after_intent_detection(state: AgentState) -> str:
     if track == "off_topic":
         return "off_topic"
     return "prompt_builder"
+
+
+def route_after_relationship_classification(state: AgentState) -> str:
+    """Route to clarification when confidence is too low, otherwise proceed."""
+    if state.get("relationship_type") == "uncertain":
+        return "clarify"
+    return "proceed"
 
 
 # ─────────────────────────────────────────────
