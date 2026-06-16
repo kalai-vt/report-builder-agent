@@ -35,6 +35,22 @@ NON-COMPLIANCE DISAMBIGUATION (CRITICAL — read before generating any non-compl
   "non-compliance report for [month], categorized"       → Example 2
   DEFAULT (no grouping word): ALWAYS use Example 1 — individual employee rows, never aggregate.
 
+STREAM DISAMBIGUATION (CRITICAL — read before generating any stream/department SQL):
+  Trigger: any prompt containing "stream", "department", "stream-wise", "department-wise",
+           "employees in a stream", "employees by stream", "stream report".
+
+  MANDATORY RULE — user_table.stream stores a NUMERIC tag_id, NOT a readable name.
+  ● NEVER select u.stream  — it returns a raw numeric ID to the user.
+  ● ALWAYS join: LEFT JOIN tags t ON t.tag_id = u.stream
+  ● ALWAYS display: t.tag AS stream
+  ● ALWAYS filter:  t.tag LIKE '%<stream_name>%'
+  ● NEVER filter:   u.stream = '<stream_name>'
+
+  "employees in the [X] stream"   → Example 13 (employee list, t.tag AS stream, NO u.stream)
+  "employees in the [X] department" → Example 13
+  "employee count by stream"       → Example 15 (aggregate, GROUP BY t.tag)
+  DEFAULT for any stream query: use Example 13 as the base template.
+
 ─── Example 1 ─────────────────────────────────────────────────────────────────
   Query  : "Provide the non-compliance report for April 2026"
   Intent : Employee-level list of goals NOT completed in a specific month
@@ -273,6 +289,46 @@ WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND 
   AND s.status_name LIKE '%Pending%'
 ORDER BY assigned_by, u.firstname
 
+─── Example 13 ────────────────────────────────────────────────────────────────
+  Query  : "Give me a report of all employees in the QA stream."
+  Intent : Employees in a named stream — join tags to resolve readable name.
+  ⚠ DO NOT select u.stream (numeric ID). DO NOT filter u.stream = 'QA'.
+    SELECT must use t.tag AS stream. Filter must use t.tag LIKE '%QA%'.
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       t.tag AS stream
+FROM user_table u
+LEFT JOIN tags t ON t.tag_id = u.stream
+WHERE t.tag LIKE '%QA%'
+  AND u.is_active=1 AND u.is_delete=0
+ORDER BY u.firstname
+
+─── Example 14 ────────────────────────────────────────────────────────────────
+  Query  : "Show all employees in the Dev stream."
+  Intent : Same stream-lookup pattern — change only the stream name in the WHERE clause.
+  ⚠ DO NOT select u.stream (numeric ID). DO NOT filter u.stream = 'Dev'.
+    SELECT must use t.tag AS stream. Filter must use t.tag LIKE '%Dev%'.
+  SQL:
+SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+       t.tag AS stream
+FROM user_table u
+LEFT JOIN tags t ON t.tag_id = u.stream
+WHERE t.tag LIKE '%Dev%'
+  AND u.is_active=1 AND u.is_delete=0
+ORDER BY u.firstname
+
+─── Example 15 ────────────────────────────────────────────────────────────────
+  Query  : "Show employee count by stream."
+  Intent : Aggregate headcount per stream — group by t.tag (readable name), not by u.stream (tag_id)
+  ⚠ STREAM RULE: NEVER group by u.stream directly. Group by t.tag after joining tags.
+  SQL:
+SELECT t.tag AS stream, COUNT(u.employee_id) AS employee_count
+FROM user_table u
+LEFT JOIN tags t ON t.tag_id = u.stream
+WHERE u.is_active=1 AND u.is_delete=0
+GROUP BY t.tag
+ORDER BY employee_count DESC
+
 ════════════════════════════════════════
 """
 
@@ -381,11 +437,14 @@ PERIOD / MONTH TERMS:
     a) If the user provides a specific value AND the column exists in the schema above:
        Generate SQL using that value directly in a WHERE clause.
        Do NOT assume or verify whether the value exists — let the database return rows.
-       Example: "Show employees in Sales stream"
-         → WHERE u.stream = 'Sales'   (stream column exists → safe to use)
+       ⚠ STREAM EXCEPTION — user_table.stream stores a numeric tag_id, NOT a name:
+         WRONG → WHERE u.stream = 'QA'
+         CORRECT → LEFT JOIN tags t ON t.tag_id = u.stream … WHERE t.tag LIKE '%QA%'
+         See Examples 13–15 and Rule 16 for the full stream pattern.
     b) If the user asks to LIST available values ("show all streams", "what designations exist"):
        Generate: SELECT DISTINCT <column> FROM <table> ORDER BY <column>
        to return actual values from the database.
+       For streams: SELECT DISTINCT t.tag FROM tags t ORDER BY t.tag
     c) If the column itself does NOT exist in the schema above:
        Set sql_query to "" and explain that the data is not available.
     d) NEVER invent or hardcode enumerable values (stream names, status names,
@@ -661,6 +720,25 @@ PERIOD / MONTH TERMS:
          AND s.status_name LIKE '%Pending%'
        ORDER BY ugm.assigned_date DESC
 
+    p) STREAM / DEPARTMENT EMPLOYEE LIST (use when user asks about employees "in a stream", "in a department", or "stream-wise"):
+       ⚠ CRITICAL: user_table.stream stores a numeric tag_id — NEVER select it, NEVER compare it to a name.
+       ALWAYS join the tags table. Display column MUST be t.tag AS stream, NEVER u.stream.
+       -- For a named stream (e.g. "QA", "Dev"):
+       SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee,
+              t.tag AS stream
+       FROM user_table u
+       LEFT JOIN tags t ON t.tag_id = u.stream
+       WHERE t.tag LIKE '%<stream_name>%'
+         AND u.is_active=1 AND u.is_delete=0
+       ORDER BY u.firstname
+       -- For aggregate count by stream:
+       SELECT t.tag AS stream, COUNT(u.employee_id) AS employee_count
+       FROM user_table u
+       LEFT JOIN tags t ON t.tag_id = u.stream
+       WHERE u.is_active=1 AND u.is_delete=0
+       GROUP BY t.tag
+       ORDER BY employee_count DESC
+
     i) RNR NOMINATIONS:
        SELECT CONCAT(TRIM(n.firstname),' ',TRIM(n.lastname),' (',n.employee_id,')') AS nominee,
               CONCAT(TRIM(nr.firstname),' ',TRIM(nr.lastname)) AS nominated_by,
@@ -671,6 +749,34 @@ PERIOD / MONTH TERMS:
        JOIN rnr_categories cat  ON rn.category_id = cat.category_id
        JOIN rnr_cycles rc       ON rn.cycle_id = rc.cycle_id
        WHERE rc.is_deleted=0 AND cat.is_delete=0 AND cat.is_active=1
+
+16. STREAM / DEPARTMENT COLUMN RULE (CRITICAL — applies to every query involving streams or departments):
+    user_table.stream stores a numeric foreign key (tag_id), NOT a readable stream name.
+    Violating this rule returns raw IDs in the output or matches no rows at all.
+
+    MANDATORY JOIN for any stream/department query:
+      user_table u LEFT JOIN tags t ON t.tag_id = u.stream
+
+    ┌──────────────────────────────────────────────┬─────────────────────────────────────────────────┐
+    │ WRONG (never do this)                        │ CORRECT                                         │
+    ├──────────────────────────────────────────────┼─────────────────────────────────────────────────┤
+    │ SELECT u.stream                              │ SELECT t.tag AS stream                          │
+    │ SELECT u.stream AS stream                    │   (after LEFT JOIN tags t ON t.tag_id = u.stream)│
+    │ WHERE u.stream = 'QA'                        │ WHERE t.tag LIKE '%QA%'                         │
+    │ GROUP BY u.stream  (for stream display)      │ GROUP BY t.tag                                  │
+    └──────────────────────────────────────────────┴─────────────────────────────────────────────────┘
+
+    SELECT RULE: NEVER include u.stream in the SELECT list for stream-related employee queries.
+                 The only acceptable stream display column is t.tag AS stream.
+                 u.stream is a numeric ID — selecting it returns meaningless numbers to the user.
+
+    Trigger phrases: "in the QA stream", "Dev stream employees", "stream-wise", "by stream",
+                     "department-wise", "employees in department", "how many per stream",
+                     "employees in <any> stream", "stream report", "stream-based report".
+
+    Schema validation: before generating stream SQL, confirm user_table.stream, tags.tag_id,
+    and tags.tag all exist in the schema. If any is missing, set sql_query to "" and ask for
+    schema-grounded clarification.
 
 ════════════════════════════════════════
  CONVERSATION CONTEXT

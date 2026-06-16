@@ -231,6 +231,73 @@
         "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1"
       },
       "sql_pattern": "SELECT CONCAT(TRIM(assigner.firstname),' ',TRIM(assigner.lastname)) AS assigned_by, CONCAT(TRIM(mgr.firstname),' ',TRIM(mgr.lastname)) AS reporting_manager, CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, u.stream AS department, mg.goal_desc AS goal_name, s.status_name AS goal_status, ugm.target_date, ugm.assigned_date FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id JOIN designation d ON u.designation_id = d.designation_id JOIN master_goals mg ON ugm.goal_id = mg.goal_id LEFT JOIN status s ON ugm.status_id = s.id LEFT JOIN user_table assigner ON ugm.assigned_by = assigner.employee_id LEFT JOIN user_table mgr ON u.reporting_manager = mgr.employee_id WHERE u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1 AND s.status_name LIKE '%Pending%' ORDER BY assigned_by, u.firstname"
+    },
+    {
+      "id": "stream_employees_by_stream_name",
+      "intent": "employees_in_stream",
+      "prompt": "Give me a report of all employees in the QA stream.",
+      "business_meaning": "List active employees belonging to a specific stream/department — user_table.stream stores a tag_id, so the tags table must be joined to resolve the human-readable stream name. Filter using tags.tag LIKE '%<stream>%', never compare u.stream directly to a string.",
+      "tables": ["user_table", "tags"],
+      "joins": [
+        "tags t ON t.tag_id = u.stream"
+      ],
+      "filters": {
+        "stream": "t.tag LIKE '%QA%'",
+        "active": "u.is_active=1 AND u.is_delete=0"
+      },
+      "stream_join_rule": "user_table.stream stores a numeric tag_id. Always join: user_table u LEFT JOIN tags t ON t.tag_id = u.stream. Display t.tag AS stream. Filter with t.tag LIKE '%<name>%'. Never use u.stream = '<name>'.",
+      "sql_pattern": "SELECT u.firstname, u.lastname, u.employee_id, u.designation, t.tag AS stream FROM user_table u LEFT JOIN tags t ON t.tag_id = u.stream WHERE t.tag LIKE '%QA%' AND u.is_active=1 AND u.is_delete=0 ORDER BY u.firstname"
+    },
+    {
+      "id": "stream_employees_dev",
+      "intent": "employees_in_stream",
+      "prompt": "Show all employees in the Dev stream.",
+      "business_meaning": "Same stream-lookup pattern as stream_employees_by_stream_name — the stream name in the WHERE clause changes to match the requested stream. Always join tags on tag_id; never filter on the raw u.stream column.",
+      "tables": ["user_table", "tags"],
+      "joins": [
+        "tags t ON t.tag_id = u.stream"
+      ],
+      "filters": {
+        "stream": "t.tag LIKE '%Dev%'",
+        "active": "u.is_active=1 AND u.is_delete=0"
+      },
+      "stream_join_rule": "user_table.stream stores a numeric tag_id. Always join: user_table u LEFT JOIN tags t ON t.tag_id = u.stream. Display t.tag AS stream. Filter with t.tag LIKE '%<name>%'. Never use u.stream = '<name>'.",
+      "sql_pattern": "SELECT u.firstname, u.lastname, u.employee_id, u.designation, t.tag AS stream FROM user_table u LEFT JOIN tags t ON t.tag_id = u.stream WHERE t.tag LIKE '%Dev%' AND u.is_active=1 AND u.is_delete=0 ORDER BY u.firstname"
+    },
+    {
+      "id": "stream_employee_count",
+      "intent": "employee_count_by_stream",
+      "prompt": "Show employee count by stream.",
+      "business_meaning": "Aggregate count of active employees grouped by stream/department — join tags to resolve the readable stream name from user_table.stream (tag_id), group by t.tag, order by count descending.",
+      "tables": ["user_table", "tags"],
+      "joins": [
+        "tags t ON t.tag_id = u.stream"
+      ],
+      "filters": {
+        "active": "u.is_active=1 AND u.is_delete=0",
+        "grouping": "GROUP BY t.tag ORDER BY employee_count DESC"
+      },
+      "stream_join_rule": "user_table.stream stores a numeric tag_id. Always join: user_table u LEFT JOIN tags t ON t.tag_id = u.stream. Display t.tag AS stream. Filter with t.tag LIKE '%<name>%'. Never use u.stream = '<name>'.",
+      "sql_pattern": "SELECT t.tag AS stream, COUNT(u.employee_id) AS employee_count FROM user_table u LEFT JOIN tags t ON t.tag_id = u.stream WHERE u.is_active=1 AND u.is_delete=0 GROUP BY t.tag ORDER BY employee_count DESC"
     }
-  ]
+  ],
+  "stream_sql_rules": {
+    "description": "Rules that govern SQL generation for any prompt about streams, departments, or stream-wise employee data.",
+    "schema_prerequisite": "Verify that both user_table.stream and tags.tag_id exist in kra_schema_llm_context.json before applying these rules. If the tags table is unavailable, ask a schema-grounded clarification instead of generating SQL.",
+    "join_required": "user_table u LEFT JOIN tags t ON t.tag_id = u.stream",
+    "display_column": "t.tag AS stream",
+    "filter_pattern": "t.tag LIKE '%<stream_name>%'",
+    "rules": [
+      "For any stream-related prompt, do NOT return user_table.stream directly.",
+      "Always join: user_table u LEFT JOIN tags t ON t.tag_id = u.stream",
+      "Display stream using: t.tag AS stream",
+      "Filter stream values using: t.tag LIKE '%<stream_name>%'",
+      "Do not use: u.stream = '<stream_name>'",
+      "Do not display numeric stream IDs unless explicitly requested.",
+      "Use the stream few-shot examples (stream_employees_by_stream_name, stream_employees_dev, stream_employee_count) as the default reference for all stream/department queries.",
+      "Keep existing employee display and report rendering logic unchanged.",
+      "If tags table is unavailable in schema, ask schema-grounded clarification instead of generating fake SQL."
+    ],
+    "trigger_keywords": ["stream", "department", "stream-wise", "department-wise", "QA stream", "Dev stream", "employees in stream"]
+  }
 }
