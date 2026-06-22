@@ -15,6 +15,9 @@ _EMPTY: Dict[str, Any] = {
     "date_range": "",
     "generated_sql": "",
     "last_query": "",
+    "pending_clarification": False,
+    "original_prompt": "",
+    "missing_slots": [],
 }
 
 
@@ -28,6 +31,10 @@ def _empty_context() -> Dict[str, Any]:
         "date_range": "",
         "generated_sql": "",
         "last_query": "",
+        # KRA clarification state
+        "pending_clarification": False,
+        "original_prompt": "",
+        "missing_slots": [],
     }
 
 
@@ -75,6 +82,10 @@ class ActiveReportContextManager:
         dimensions: Optional[List[str]] = None,
         metrics: Optional[List[str]] = None,
         date_range: str = "",
+        # KRA clarification state
+        pending_clarification: Optional[bool] = None,
+        original_prompt: str = "",
+        missing_slots: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Merge new data into the active report context and return the updated copy."""
         key = self._key(user_id, chat_session_id)
@@ -96,6 +107,12 @@ class ActiveReportContextManager:
             ctx["metrics"] = metrics
         if date_range:
             ctx["date_range"] = date_range
+        if pending_clarification is not None:
+            ctx["pending_clarification"] = pending_clarification
+        if original_prompt:
+            ctx["original_prompt"] = original_prompt
+        if missing_slots is not None:
+            ctx["missing_slots"] = missing_slots
 
         self._store[key] = ctx
         self._timestamps[key] = time.time()

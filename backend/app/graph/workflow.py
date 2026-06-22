@@ -19,6 +19,8 @@ from app.graph.nodes import (
     increment_retry_test_node,
     increment_retry_validation_node,
     intent_detector_node,
+    kra_clarification_detector_node,
+    kra_clarification_node,
     llm_node,
     load_context_node,
     memory_store_node,
@@ -31,6 +33,7 @@ from app.graph.nodes import (
     result_formatter_node,
     route_after_execution,
     route_after_intent_detection,
+    route_after_kra_clarification,
     route_after_relationship_classification,
     route_after_sql_test,
     route_after_validation,
@@ -63,6 +66,8 @@ def build_workflow():
     graph.add_node("intent_detector",            intent_detector_node)
     graph.add_node("greeting",                   greeting_node)
     graph.add_node("off_topic",                  off_topic_node)
+    graph.add_node("kra_clarification_detector", kra_clarification_detector_node)
+    graph.add_node("kra_clarification",          kra_clarification_node)
     graph.add_node("relationship_classifier",    relationship_classifier_node)
     graph.add_node("relationship_clarification", relationship_clarification_node)
     graph.add_node("context_manager",            context_manager_node)
@@ -93,19 +98,30 @@ def build_workflow():
     )
 
     # ── Intent routing (Track A / B / C) ─────────────────────────────────────
-    # "prompt_builder" from route_after_intent_detection now routes to
-    # relationship_classifier instead of directly to prompt_builder.
+    # Track C ("prompt_builder") goes to kra_clarification_detector first,
+    # which either asks for clarification or passes through to relationship_classifier.
     graph.add_conditional_edges(
         "intent_detector",
         route_after_intent_detection,
         {
             "greeting":       "greeting",
             "off_topic":      "off_topic",
-            "prompt_builder": "relationship_classifier",
+            "prompt_builder": "kra_clarification_detector",
         },
     )
     graph.add_edge("greeting",  END)
     graph.add_edge("off_topic", END)
+
+    # ── KRA clarification → ask user or proceed ───────────────────────────────
+    graph.add_conditional_edges(
+        "kra_clarification_detector",
+        route_after_kra_clarification,
+        {
+            "clarify": "kra_clarification",
+            "proceed": "relationship_classifier",
+        },
+    )
+    graph.add_edge("kra_clarification", END)
 
     # ── Relationship classification → clarify or proceed ─────────────────────
     graph.add_conditional_edges(
@@ -224,6 +240,13 @@ def _base_state(extra: Dict[str, Any]) -> AgentState:
         "off_topic_message":   "",
         "extracted_filters":   {},
         "enriched_prompt":     "",
+        # KRA clarification (slot-based)
+        "kra_clarification_needed":        False,
+        "kra_clarification_reason":        "",
+        "kra_clarification_question":      "",
+        "kra_clarification_options":       [],
+        "kra_clarification_missing_slots": [],
+        "kra_is_clarification_answer":     False,
         # Relationship classification
         "relationship_type":       "new_request",
         "relationship_confidence": 0.0,

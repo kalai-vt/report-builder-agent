@@ -6,9 +6,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from app.agents.clarification_agent import kra_clarification_detector
 from app.config import settings
 from app.graph.nodes import query_cache
 from app.graph.workflow import run_intent_report, run_refresh_agent, run_replay_agent
+from app.services.context_manager import active_report_context_manager
 from app.services.report_service import report_service
 from app.services.session_store import session_store
 
@@ -19,6 +21,12 @@ router = APIRouter()
 # e.g. "filter by location LOC001", "show only completed", "narrow to Q1"
 _FILTER_REDIRECT_RE = re.compile(
     r"^\s*(filter\s+(by|to|for)|show\s+only|narrow\s+(by|to)|only\s+show|sort\s+by|group\s+by)\b",
+    re.IGNORECASE,
+)
+
+# Matches "Specific team lead", "Specific lead", "specific team lead — please provide..."
+_SPECIFIC_LEAD_RE = re.compile(
+    r"^\s*specific\s+(team\s+)?lead\b",
     re.IGNORECASE,
 )
 
@@ -122,6 +130,25 @@ class GenerateRequest(BaseModel):
         }
 
 
+class ClarifyRequest(BaseModel):
+    user_answer: str = Field(..., description="The user's answer to the clarification question")
+    user_id: str = Field("demo_user", description="User identifier")
+    user_role: str = Field("employee", description="Role of the requesting user")
+    session_id: str = Field("", description="Session ID from the preceding clarification response")
+    chat_session_id: str = Field("", description="Conversation-level session UUID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user_answer": "Last month",
+                "user_id": "user_42",
+                "user_role": "employee",
+                "session_id": "sess_abc123",
+                "chat_session_id": "",
+            }
+        }
+
+
 class ReplayRequest(BaseModel):
     sql_query: str = Field(..., description="The saved SQL query to re-execute against live data")
     user_id: str = Field("demo_user", description="User identifier")
@@ -137,9 +164,11 @@ class ReportResponse(BaseModel):
     message: Optional[str] = None
     suggestions: Optional[List[str]] = None
 
-    # Clarification (relationship_type == "uncertain")
-    follow_up_question: Optional[str] = Field(None, description="Clarification question when relationship is ambiguous")
+    # Clarification (relationship ambiguity OR KRA slot ambiguity)
+    follow_up_question: Optional[str] = Field(None, description="Clarification question")
     follow_up_options: Optional[List[str]] = Field(None, description="Suggested answer options for clarification")
+    options: Optional[List[str]] = Field(None, description="Schema-grounded options (KRA clarification)")
+    missing_slots: Optional[List[str]] = Field(None, description="Slots that must be filled before SQL can be generated")
 
     # Success
     enriched_prompt: Optional[str] = None
@@ -210,11 +239,20 @@ def _build_report_response(
             session_id=session_id,
         )
     if status == "clarification_needed":
+        question = (
+            result.get("follow_up_question")
+            or result.get("message", "")
+        )
+        # KRA slot clarification uses "options" and "missing_slots";
+        # relationship clarification uses "follow_up_options".
+        opts = result.get("options") or result.get("follow_up_options") or []
         return ReportResponse(
             status="clarification_needed",
-            message=result.get("follow_up_question") or result.get("message", ""),
-            follow_up_question=result.get("follow_up_question"),
-            follow_up_options=result.get("follow_up_options", []),
+            message=question,
+            follow_up_question=question,
+            follow_up_options=opts,
+            options=opts,
+            missing_slots=result.get("missing_slots") or [],
             session_id=session_id,
         )
     # success (may carry an error field if SQL execution failed)
@@ -372,6 +410,102 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
 
     except Exception as exc:
         logger.exception(f"[generate] error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post(
+    "/report/clarify",
+    response_model=ReportResponse,
+    summary="Submit answer to a clarification question",
+    description=(
+        "Called when the user answers a clarification question raised by `/report/generate`. "
+        "The answer is merged with the original prompt stored in the session context and "
+        "the combined query is passed through the normal SQL generation pipeline."
+    ),
+)
+async def clarify_report(request: ClarifyRequest) -> ReportResponse:
+    try:
+        if not request.user_answer.strip():
+            raise HTTPException(status_code=400, detail="user_answer must not be empty")
+
+        # Merge the clarification answer with the original prompt BEFORE calling
+        # run_intent_report.  Without this, a short answer like "design and dev-data"
+        # would be classified as off_topic by the intent agent and never reach
+        # kra_clarification_detector where the merge normally happens.
+        ctx = active_report_context_manager.get(request.user_id, request.chat_session_id)
+        if ctx.get("pending_clarification"):
+            missing_slots = ctx.get("missing_slots", [])
+
+            # "Specific team lead" option chosen — ask for the actual lead name.
+            if "team_or_lead" in missing_slots and _SPECIFIC_LEAD_RE.match(request.user_answer.strip()):
+                active_report_context_manager.update(
+                    request.user_id,
+                    request.chat_session_id,
+                    pending_clarification=True,
+                    original_prompt=ctx.get("original_prompt", ""),
+                    missing_slots=["team_lead_name"],
+                )
+                follow_session_id = session_store.create({
+                    "original_prompt": ctx.get("original_prompt", ""),
+                    "user_id": request.user_id,
+                    "user_role": request.user_role,
+                })
+                return ReportResponse(
+                    status="clarification_needed",
+                    message="Please provide the team lead name.",
+                    follow_up_question="Please provide the team lead name.",
+                    follow_up_options=[],
+                    options=[],
+                    missing_slots=["team_lead_name"],
+                    session_id=follow_session_id,
+                )
+
+            query_to_run = kra_clarification_detector._merge_prompt(
+                ctx.get("original_prompt", ""),
+                request.user_answer,
+                missing_slots,
+            )
+            # Clear pending state — merged query is now a self-contained fresh request.
+            active_report_context_manager.update(
+                request.user_id,
+                request.chat_session_id,
+                pending_clarification=False,
+                original_prompt="",
+                missing_slots=[],
+            )
+            logger.info(
+                "[clarify] merged %r + %r → %r",
+                ctx.get("original_prompt", "")[:60],
+                request.user_answer[:40],
+                query_to_run[:80],
+            )
+        else:
+            query_to_run = request.user_answer
+
+        session_id = session_store.create({
+            "original_prompt": query_to_run,
+            "user_id": request.user_id,
+            "user_role": request.user_role,
+        })
+
+        result = await run_intent_report(
+            user_id=request.user_id,
+            query=query_to_run,
+            user_role=request.user_role,
+            session_id=session_id,
+            chat_session_id=request.chat_session_id,
+        )
+
+        status = result.get("status", "success")
+        logger.info(
+            f"[clarify] user={request.user_id} status={status} session={session_id}"
+        )
+        return _build_report_response(status, result, session_id, query_to_run)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[clarify] error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 

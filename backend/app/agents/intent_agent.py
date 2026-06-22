@@ -36,6 +36,8 @@ Triggers: hi, hello, hey, good morning/afternoon/evening, how are you, thanks, t
          ("what can you do", "who are you", "are you ChatGPT").
 Special: "thanks"/"ok"/"great" AFTER a report → Track A (respond warmly, offer next actions).
 Do NOT use for messages that also mention goals, KRA, performance, ratings, or employees.
+CRITICAL: "How are we doing?", "How do we stand?", "How's our performance?" are KRA metric
+         queries → ALWAYS track="clear". They are NOT greetings.
 
 Response rule: 1 warm sentence + 1 specific KRA report suggestion. Max 2 sentences. NEVER ask
 open-ended "how can I help" — suggest something specific based on user role.
@@ -65,6 +67,7 @@ User-provided values (stream, designation, status, name) → always use in WHERE
 Write enriched_prompt as ONE precise sentence using KRA schema terminology.
 
 ALWAYS track="clear":
+  - "How are we doing?" / "How do we stand?" / "How's our performance?" → KRA health metric query
   - "Show employees in [stream/designation/role/value]"  → WHERE col='value'
   - "Show goals [assigned by manager / by team / all]"   → from user_goal_mapping
   - "Show feedback"                                       → FROM user_feedback
