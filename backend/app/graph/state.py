@@ -66,6 +66,15 @@ class AgentState(TypedDict, total=False):
     # Active Report Context (structured state for the current open report)
     active_report_context: Dict[str, Any]
 
+    # KRA Clarification (slot-based ambiguity detection, runs before relationship_classifier)
+    kra_clarification_needed: bool          # True → return clarification; don't generate SQL
+    kra_clarification_reason: str           # e.g. "missing_period" | "missing_report_type"
+    kra_clarification_question: str         # Question shown to the user
+    kra_clarification_options: List[str]    # Schema-grounded answer choices
+    kra_clarification_missing_slots: List[str]  # e.g. ["period"] | ["report_type"]
+    kra_is_clarification_answer: bool       # True when user just answered a clarification
+    # When kra_is_clarification_answer=True, enriched_prompt carries the merged query
+
     # SQL Test Execution (LIMIT 0 dry-run before full execution)
     test_execution_passed: bool   # True when LIMIT 0 dry-run succeeded
     test_execution_error: str     # DB error message from a failed dry-run

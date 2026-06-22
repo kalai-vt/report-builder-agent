@@ -1,10 +1,12 @@
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 from sqlalchemy.exc import OperationalError
 
+from app.agents.clarification_agent import kra_clarification_detector
 from app.agents.intent_agent import intent_agent
 from app.agents.llm_agent import llm_agent
 from app.agents.prompt_builder import prompt_builder, extract_column_hint
@@ -803,6 +805,141 @@ def relationship_clarification_node(state: AgentState) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
+# Node: KRA Clarification Detector
+# Runs after intent_detector (track=clear).
+# Detects ambiguous / underspecified KRA prompts
+# and either asks for clarification or — when the
+# user is answering a previous clarification —
+# merges the answers into a combined prompt.
+# ─────────────────────────────────────────────
+
+def kra_clarification_detector_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    user_id = state.get("user_id", "")
+    chat_session_id = state.get("chat_session_id", "")
+    user_query = state.get("user_query", "")
+
+    result = kra_clarification_detector.detect(
+        user_message=user_query,
+        user_id=user_id,
+        chat_session_id=chat_session_id,
+    )
+
+    duration = round((time.time() - t0) * 1000, 1)
+    step = {
+        "node": "kra_clarification_detector",
+        "needs_clarification": result["needs_clarification"],
+        "reason": result.get("reason", ""),
+        "is_answer": result.get("is_clarification_answer", False),
+        "duration_ms": duration,
+    }
+    logger.info(
+        "[kra_clarification] user=%s needs=%s reason=%s is_answer=%s",
+        user_id,
+        result["needs_clarification"],
+        result.get("reason", "none"),
+        result.get("is_clarification_answer", False),
+    )
+
+    out: Dict[str, Any] = {
+        "kra_clarification_needed":      result["needs_clarification"],
+        "kra_clarification_reason":      result.get("reason", ""),
+        "kra_clarification_question":    result.get("question", ""),
+        "kra_clarification_options":     result.get("options", []),
+        "kra_clarification_missing_slots": result.get("missing_slots", []),
+        "kra_is_clarification_answer":   result.get("is_clarification_answer", False),
+        "steps": _steps(state) + [step],
+    }
+
+    # When the user answered a clarification, replace enriched_prompt with the
+    # merged query so prompt_builder uses the full combined question.
+    merged = result.get("merged_prompt")
+    if result.get("is_clarification_answer") and merged:
+        out["enriched_prompt"] = merged
+        # Clear pending state now that the answer has been consumed.
+        try:
+            active_report_context_manager.update(
+                user_id,
+                chat_session_id,
+                pending_clarification=False,
+                original_prompt="",
+                missing_slots=[],
+            )
+        except Exception as exc:
+            logger.warning("[kra_clarification] clear pending failed: %s", exc)
+
+    return out
+
+
+# ─────────────────────────────────────────────
+# Node: KRA Clarification Response
+# Returns the clarification question + options
+# to the frontend without generating any SQL.
+# Also saves the clarification state so the next
+# turn can merge the answer with the original prompt.
+# ─────────────────────────────────────────────
+
+def kra_clarification_node(state: AgentState) -> Dict[str, Any]:
+    t0 = time.time()
+    user_id = state.get("user_id", "")
+    chat_session_id = state.get("chat_session_id", "")
+    question = state.get("kra_clarification_question", "")
+    options = state.get("kra_clarification_options", [])
+    missing_slots = state.get("kra_clarification_missing_slots", [])
+    reason = state.get("kra_clarification_reason", "")
+
+    # Persist the original prompt so the next turn can merge the answer.
+    try:
+        active_report_context_manager.update(
+            user_id,
+            chat_session_id,
+            pending_clarification=True,
+            original_prompt=state.get("user_query", ""),
+            missing_slots=missing_slots,
+        )
+    except Exception as exc:
+        logger.warning("[kra_clarification] persist pending failed: %s", exc)
+
+    # Save to conversation memory so the next turn has full context.
+    try:
+        memory_manager.add_interaction(
+            user_id=user_id,
+            user_message=state.get("user_query", ""),
+            assistant_message=f"[Clarification needed] {question}",
+            sql_query=None,
+            chat_session_id=chat_session_id,
+        )
+    except Exception as exc:
+        logger.warning("[kra_clarification] memory save failed: %s", exc)
+
+    formatted = {
+        "type": "clarification_needed",
+        "status": "clarification_needed",
+        "reason": reason,
+        "message": question,
+        "follow_up_question": question,
+        "follow_up_options": options,
+        "options": options,
+        "missing_slots": missing_slots,
+        "data": [],
+        "row_count": 0,
+        "execution_time": 0.0,
+    }
+
+    step = {
+        "node": "kra_clarification",
+        "status": "success",
+        "reason": reason,
+        "duration_ms": round((time.time() - t0) * 1000, 1),
+    }
+    logger.info(
+        "[kra_clarification] user=%s question=%s",
+        user_id, question[:80],
+    )
+    return {"formatted_result": formatted, "steps": _steps(state) + [step]}
+
+
+# ─────────────────────────────────────────────
 # Conditional Edge Functions
 # ─────────────────────────────────────────────
 
@@ -839,13 +976,33 @@ def route_after_execution(state: AgentState) -> str:
     return "stop"
 
 
+_KRA_HEALTH_RE = re.compile(
+    r"\bhow\s+(are\s+we\s+doing|do\s+we\s+(stand|compare))\b"
+    r"|\bhow'?s\s+our\s+(performance|progress)\b",
+    re.IGNORECASE,
+)
+
+
 def route_after_intent_detection(state: AgentState) -> str:
     track = state.get("intent_track", "clear")
+
+    # KRA health-check queries ("How are we doing?", "How do we stand?") are
+    # sometimes misclassified as greetings by the LLM.  Override to the KRA pipeline.
+    if track == "greeting" and _KRA_HEALTH_RE.search(state.get("user_query", "")):
+        return "prompt_builder"
+
     if track == "greeting":
         return "greeting"
     if track == "off_topic":
         return "off_topic"
     return "prompt_builder"
+
+
+def route_after_kra_clarification(state: AgentState) -> str:
+    """Route to clarification when KRA slot detection needs more info, else proceed."""
+    if state.get("kra_clarification_needed"):
+        return "clarify"
+    return "proceed"
 
 
 def route_after_relationship_classification(state: AgentState) -> str:
