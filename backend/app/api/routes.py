@@ -376,6 +376,13 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
                 session_id=session_id,
             )
 
+        # Reset clarification attempt count so every fresh generate starts clean.
+        active_report_context_manager.update(
+            request.user_id,
+            request.chat_session_id,
+            clarification_attempt_count=0,
+        )
+
         user_limit = _extract_user_limit(request.query)
         effective_page_size = user_limit if user_limit > 0 else (request.page_size or settings.PAGE_SIZE)
 
@@ -438,12 +445,14 @@ async def clarify_report(request: ClarifyRequest) -> ReportResponse:
 
             # "Specific team lead" option chosen — ask for the actual lead name.
             if "team_or_lead" in missing_slots and _SPECIFIC_LEAD_RE.match(request.user_answer.strip()):
+                current_count = ctx.get("clarification_attempt_count", 0)
                 active_report_context_manager.update(
                     request.user_id,
                     request.chat_session_id,
                     pending_clarification=True,
                     original_prompt=ctx.get("original_prompt", ""),
                     missing_slots=["team_lead_name"],
+                    clarification_attempt_count=current_count + 1,
                 )
                 follow_session_id = session_store.create({
                     "original_prompt": ctx.get("original_prompt", ""),

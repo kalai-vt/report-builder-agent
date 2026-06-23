@@ -27,6 +27,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from app.services.schema_metadata_service import schema_metadata_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -228,48 +230,24 @@ _KNOWN_REPORT_TYPE_RE = re.compile(
 )
 
 
-# ── Option lists ──────────────────────────────────────────────────────────────
+# ── Option lists (delegated to schema_metadata_service for live DB values) ────
+# These module-level aliases keep the detect() body readable; they call the
+# service lazily at detection time rather than at import time.
 
-_REPORT_TYPE_OPTIONS = [
-    "KRA goals report",
-    "Remark compliance report",
-    "Missing remarks report",
-    "At-risk goals report",
-    "Goal completion report",
-    "Team performance report",
-    "Employee performance report",
-]
+def _REPORT_TYPE_OPTIONS() -> List[str]:          # noqa: N802
+    return schema_metadata_service.get_report_types()
 
-_PERFORMANCE_TYPE_OPTIONS = [
-    "Employee performance report",
-    "Stream-wise performance report",
-    "Team performance report",
-    "Company-wide performance report",
-]
+def _PERFORMANCE_TYPE_OPTIONS() -> List[str]:     # noqa: N802
+    return schema_metadata_service.get_performance_type_options()
 
-_KRA_METRIC_OPTIONS = [
-    "Goal completion",
-    "Remark compliance",
-    "At-risk goals",
-    "Missing remarks",
-    "Overall KRA health",
-]
+def _KRA_METRIC_OPTIONS() -> List[str]:           # noqa: N802
+    return schema_metadata_service.get_kra_metric_options()
 
-_COMPLIANCE_SCOPE_OPTIONS = [
-    "Company-wide compliance",
-    "Stream-wise compliance",
-    "Team-wise compliance",
-    "Employee-wise compliance",
-]
+def _COMPLIANCE_SCOPE_OPTIONS() -> List[str]:     # noqa: N802
+    return schema_metadata_service.get_compliance_scope_options()
 
-_PERIOD_OPTIONS = [
-    "This month",
-    "Last month",
-    "Current quarter",
-    "Last quarter",
-    "This year",
-    "Custom date range",
-]
+def _PERIOD_OPTIONS() -> List[str]:               # noqa: N802
+    return schema_metadata_service.get_period_options()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,7 +288,7 @@ class KRAClarificationDetector:
             return self._clarify(
                 reason="missing_kra_metric",
                 question="Which KRA metric do you want to review?",
-                options=_KRA_METRIC_OPTIONS,
+                options=_KRA_METRIC_OPTIONS(),
                 missing_slots=["kra_metric", "period"],
             )
 
@@ -319,7 +297,7 @@ class KRAClarificationDetector:
             return self._clarify(
                 reason="missing_report_type",
                 question="Which report would you like to generate?",
-                options=_REPORT_TYPE_OPTIONS,
+                options=_REPORT_TYPE_OPTIONS(),
                 missing_slots=["report_type"],
             )
 
@@ -328,7 +306,7 @@ class KRAClarificationDetector:
             return self._clarify(
                 reason="missing_performance_type",
                 question="Which performance report do you want to generate?",
-                options=_PERFORMANCE_TYPE_OPTIONS,
+                options=_PERFORMANCE_TYPE_OPTIONS(),
                 missing_slots=["report_type", "period"],
             )
 
@@ -337,13 +315,13 @@ class KRAClarificationDetector:
             return self._clarify(
                 reason="missing_compliance_scope",
                 question="Which compliance numbers do you want to view, and for which period?",
-                options=_COMPLIANCE_SCOPE_OPTIONS,
+                options=_COMPLIANCE_SCOPE_OPTIONS(),
                 missing_slots=["scope", "period"],
             )
 
         # ── 5. Comparison involving streams but no specific stream names ───────
         if self._is_comparison_without_named_streams(lower, original):
-            stream_options = self._get_stream_options()
+            stream_options = schema_metadata_service.get_streams()
             topic = self._extract_comparison_topic(lower)
             question = f"Which two streams do you want to compare{topic}?"
             return self._clarify(
@@ -365,13 +343,13 @@ class KRAClarificationDetector:
                         "Which report do you want to generate, "
                         "and what do you mean by 'last period'?"
                     ),
-                    options=_REPORT_TYPE_OPTIONS + _PERIOD_OPTIONS,
+                    options=_REPORT_TYPE_OPTIONS() + _PERIOD_OPTIONS(),
                     missing_slots=["report_type", "period"],
                 )
             return self._clarify(
                 reason="ambiguous_period",
                 question="What do you mean by 'last period'? Which period should be used?",
-                options=_PERIOD_OPTIONS,
+                options=_PERIOD_OPTIONS(),
                 missing_slots=["period"],
             )
 
@@ -382,7 +360,7 @@ class KRAClarificationDetector:
                 return self._clarify(
                     reason="missing_period",
                     question=f"Which period do you want for the {report_name}?",
-                    options=_PERIOD_OPTIONS,
+                    options=_PERIOD_OPTIONS(),
                     missing_slots=["period"],
                 )
 
@@ -496,34 +474,6 @@ class KRAClarificationDetector:
         if re.search(r"\bfeedback\b", lower):
             return "feedback report"
         return "report"
-
-    # ── DB-backed stream options ───────────────────────────────────────────────
-
-    def _get_stream_options(self) -> List[str]:
-        """
-        Fetch active stream names from the tags table.
-        Falls back to a static list if the DB call fails.
-        Schema: tags.tag, recommended_filter: tags.is_active = 1
-        """
-        try:
-            from app.db.connection import db_manager
-            from sqlalchemy import text
-
-            with db_manager.engine.connect() as conn:
-                for query in (
-                    "SELECT DISTINCT tag FROM tags WHERE is_active = 1 ORDER BY tag LIMIT 20",
-                    "SELECT DISTINCT tag FROM tags ORDER BY tag LIMIT 20",
-                ):
-                    try:
-                        rows = conn.execute(text(query))
-                        options = [r[0] for r in rows if r[0]]
-                        if options:
-                            return options
-                    except Exception:
-                        continue
-        except Exception as exc:
-            logger.warning("[clarification] stream fetch failed: %s", exc)
-        return ["QA", "Development", "DevOps", "Design", "Management"]
 
     # ── Pending-clarification state ───────────────────────────────────────────
 

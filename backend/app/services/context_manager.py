@@ -18,6 +18,9 @@ _EMPTY: Dict[str, Any] = {
     "pending_clarification": False,
     "original_prompt": "",
     "missing_slots": [],
+    # Tracks how many clarification rounds have been attempted in one session.
+    # Capped at 1; after that the pipeline skips clarification and generates SQL.
+    "clarification_attempt_count": 0,
 }
 
 
@@ -35,6 +38,7 @@ def _empty_context() -> Dict[str, Any]:
         "pending_clarification": False,
         "original_prompt": "",
         "missing_slots": [],
+        "clarification_attempt_count": 0,
     }
 
 
@@ -86,6 +90,7 @@ class ActiveReportContextManager:
         pending_clarification: Optional[bool] = None,
         original_prompt: str = "",
         missing_slots: Optional[List[str]] = None,
+        clarification_attempt_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Merge new data into the active report context and return the updated copy."""
         key = self._key(user_id, chat_session_id)
@@ -113,6 +118,8 @@ class ActiveReportContextManager:
             ctx["original_prompt"] = original_prompt
         if missing_slots is not None:
             ctx["missing_slots"] = missing_slots
+        if clarification_attempt_count is not None:
+            ctx["clarification_attempt_count"] = clarification_attempt_count
 
         self._store[key] = ctx
         self._timestamps[key] = time.time()

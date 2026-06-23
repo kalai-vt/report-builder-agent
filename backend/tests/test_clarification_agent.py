@@ -17,9 +17,6 @@ from app.agents.clarification_agent import KRAClarificationDetector
 def det():
     """Detector with DB and context-manager calls stubbed out."""
     d = KRAClarificationDetector()
-    d._get_stream_options = MagicMock(
-        return_value=["QA", "Development", "DevOps", "Design", "Management"]
-    )
     d._get_pending_clarification = MagicMock(return_value=None)
     return d
 
@@ -85,11 +82,14 @@ class TestComparison:
         r = det.detect("QA vs DevOps stream comparison.")
         assert _needs(r) is False
 
-    def test_compare_streams_options_from_db(self, det):
-        r = det.detect("Compare the two streams.")
-        # Options should come from the stubbed DB call
-        assert "QA" in _options(r) or len(_options(r)) > 0
-        det._get_stream_options.assert_called_once()
+    def test_compare_streams_options_from_schema_service(self, det):
+        with patch(
+            "app.agents.clarification_agent.schema_metadata_service.get_streams",
+            return_value=["QA", "Development", "DevOps"],
+        ) as mock_get:
+            r = det.detect("Compare the two streams.")
+            mock_get.assert_called_once()
+        assert "QA" in _options(r)
 
     def test_stream_comparison_without_compare_keyword_no_trigger(self, det):
         """Mentions streams but no comparison intent → no clarification."""
@@ -471,8 +471,6 @@ class TestMergePrompt:
 
     def test_merged_all_teams_does_not_retrigger_team_clarification(self, d):
         """'Show remarks for all teams' must NOT need further clarification."""
-        from unittest.mock import MagicMock
-        d._get_stream_options = MagicMock(return_value=["QA", "Development"])
         d._get_pending_clarification = MagicMock(return_value=None)
         merged = d._merge_prompt("Show remarks for the team.", "All teams", ["team_or_lead", "period"])
         r = d.detect(merged)
