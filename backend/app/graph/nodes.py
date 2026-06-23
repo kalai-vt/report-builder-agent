@@ -888,7 +888,38 @@ def kra_clarification_node(state: AgentState) -> Dict[str, Any]:
     missing_slots = state.get("kra_clarification_missing_slots", [])
     reason = state.get("kra_clarification_reason", "")
 
-    # Persist the original prompt so the next turn can merge the answer.
+    # Safety net: max 1 clarification round. The routing function already enforces
+    # this, but guard here too in case the node is called directly in tests.
+    try:
+        ctx = active_report_context_manager.get(user_id, chat_session_id)
+        attempt_count = ctx.get("clarification_attempt_count", 0)
+    except Exception:
+        attempt_count = 0
+
+    if attempt_count >= 1:
+        logger.warning(
+            "[kra_clarification] max rounds reached user=%s session=%s",
+            user_id, chat_session_id[:16] if chat_session_id else "",
+        )
+        formatted = {
+            "type": "clarification_failed",
+            "status": "failed",
+            "message": (
+                "I wasn't able to determine the report details after multiple attempts. "
+                "Please try again with a more specific request."
+            ),
+            "data": [],
+            "row_count": 0,
+            "execution_time": 0.0,
+        }
+        step = {
+            "node": "kra_clarification",
+            "status": "max_rounds_exceeded",
+            "duration_ms": round((time.time() - t0) * 1000, 1),
+        }
+        return {"formatted_result": formatted, "steps": _steps(state) + [step]}
+
+    # Persist the original prompt and increment the attempt count.
     try:
         active_report_context_manager.update(
             user_id,
@@ -896,6 +927,7 @@ def kra_clarification_node(state: AgentState) -> Dict[str, Any]:
             pending_clarification=True,
             original_prompt=state.get("user_query", ""),
             missing_slots=missing_slots,
+            clarification_attempt_count=attempt_count + 1,
         )
     except Exception as exc:
         logger.warning("[kra_clarification] persist pending failed: %s", exc)
@@ -999,10 +1031,24 @@ def route_after_intent_detection(state: AgentState) -> str:
 
 
 def route_after_kra_clarification(state: AgentState) -> str:
-    """Route to clarification when KRA slot detection needs more info, else proceed."""
-    if state.get("kra_clarification_needed"):
-        return "clarify"
-    return "proceed"
+    """Route to clarification when KRA slot detection needs more info, else proceed.
+    Max 1 clarification round — if one has already been asked, generate SQL regardless.
+    """
+    if not state.get("kra_clarification_needed"):
+        return "proceed"
+    user_id = state.get("user_id", "")
+    chat_session_id = state.get("chat_session_id", "")
+    try:
+        ctx = active_report_context_manager.get(user_id, chat_session_id)
+        if ctx.get("clarification_attempt_count", 0) >= 1:
+            logger.info(
+                "[kra_clarification] max 1 round reached — proceeding to SQL user=%s",
+                user_id,
+            )
+            return "proceed"
+    except Exception:
+        pass
+    return "clarify"
 
 
 def route_after_relationship_classification(state: AgentState) -> str:
