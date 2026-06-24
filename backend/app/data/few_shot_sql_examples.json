@@ -265,6 +265,85 @@
       "sql_pattern": "SELECT u.firstname, u.lastname, u.employee_id, u.designation, t.tag AS stream FROM user_table u LEFT JOIN tags t ON t.tag_id = u.stream WHERE t.tag LIKE '%Dev%' AND u.is_active=1 AND u.is_delete=0 ORDER BY u.firstname"
     },
     {
+      "id": "goals_not_filled_per_employee_month",
+      "intent": "goals_not_filled_count_per_employee_remarks_check",
+      "prompt": "Build a report of all employees with number of goals not filled for May 2026.",
+      "business_meaning": "Per-employee count of goals that have NO entry in remarks_table for May 2026. Uses INNER JOIN user_goal_mapping + LEFT JOIN remarks_table + WHERE rt.id IS NULL. Employees with all goals remarked automatically disappear (no 0-count rows). COUNT(DISTINCT ugm.id) counts only unremarked goals.",
+      "tables": ["user_table", "user_goal_mapping", "designation", "remarks_table", "tags"],
+      "joins": [
+        "user_goal_mapping ugm ON u.employee_id = ugm.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "tags t ON t.tag_id = u.stream",
+        "remarks_table rt ON ugm.goal_id = rt.goal_id"
+      ],
+      "filters": {
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1",
+        "missing_remarks": "rt.id IS NULL",
+        "date": "MONTH(ugm.target_date) = 5 AND YEAR(ugm.target_date) = 2026",
+        "order": "ORDER BY goals_not_filled DESC, employee"
+      },
+      "critical_rules": [
+        "INNER JOIN user_goal_mapping — NOT LEFT JOIN",
+        "LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id",
+        "WHERE rt.id IS NULL — the key filter that finds goals with no remark",
+        "COUNT(DISTINCT ugm.id) AS goals_not_filled",
+        "No HAVING needed — WHERE rt.id IS NULL naturally removes employees with 0 missing",
+        "NEVER use CASE WHEN s.status_name != 'Completed' for this query type"
+      ],
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, t.tag AS stream, COUNT(DISTINCT ugm.id) AS goals_not_filled FROM user_table u JOIN user_goal_mapping ugm ON u.employee_id = ugm.employee_id JOIN designation d ON u.designation_id = d.designation_id LEFT JOIN tags t ON t.tag_id = u.stream LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id WHERE u.is_active = 1 AND u.is_delete = 0 AND ugm.isDelete = 0 AND ugm.isactive = 1 AND d.is_active = 1 AND rt.id IS NULL AND MONTH(ugm.target_date) = 5 AND YEAR(ugm.target_date) = 2026 GROUP BY u.employee_id, u.firstname, u.lastname, d.designation_name, t.tag ORDER BY goals_not_filled DESC, employee"
+    },
+    {
+      "id": "goals_not_filled_all_time",
+      "intent": "goals_not_filled_count_per_employee_all_time",
+      "prompt": "Build a report of all employees with missing remarks.",
+      "business_meaning": "Same as goals_not_filled_per_employee_month but without a date filter — all-time missing remarks. INNER JOIN + LEFT JOIN remarks_table + WHERE rt.id IS NULL. No date condition.",
+      "tables": ["user_table", "user_goal_mapping", "designation", "remarks_table", "tags"],
+      "joins": [
+        "user_goal_mapping ugm ON u.employee_id = ugm.employee_id",
+        "designation d ON u.designation_id = d.designation_id",
+        "tags t ON t.tag_id = u.stream",
+        "remarks_table rt ON ugm.goal_id = rt.goal_id"
+      ],
+      "filters": {
+        "active": "u.is_active=1 AND u.is_delete=0 AND ugm.isDelete=0 AND ugm.isactive=1 AND d.is_active=1",
+        "missing_remarks": "rt.id IS NULL",
+        "order": "ORDER BY goals_not_filled DESC, employee"
+      },
+      "sql_pattern": "SELECT CONCAT(TRIM(u.firstname),' ',TRIM(u.lastname),' (',u.employee_id,')') AS employee, d.designation_name, t.tag AS stream, COUNT(DISTINCT ugm.id) AS goals_not_filled FROM user_table u JOIN user_goal_mapping ugm ON u.employee_id = ugm.employee_id JOIN designation d ON u.designation_id = d.designation_id LEFT JOIN tags t ON t.tag_id = u.stream LEFT JOIN remarks_table rt ON ugm.goal_id = rt.goal_id WHERE u.is_active = 1 AND u.is_delete = 0 AND ugm.isDelete = 0 AND ugm.isactive = 1 AND d.is_active = 1 AND rt.id IS NULL GROUP BY u.employee_id, u.firstname, u.lastname, d.designation_name, t.tag ORDER BY goals_not_filled DESC, employee"
+    },
+    {
+      "id": "count_employees_zero_remarks_month",
+      "intent": "scalar_count_employees_zero_remarks",
+      "prompt": "How many employees have zero filled remarks this month?",
+      "business_meaning": "SCALAR COUNT of active employees who have not submitted any remark in the current calendar month. The outer SELECT must be COUNT(*) AS employee_count — NEVER a list of employee names. Use a subquery: inner query groups by employee and applies HAVING COUNT(rt.id) = 0; outer query counts qualifying rows.",
+      "tables": ["user_table", "remarks_table"],
+      "joins": [
+        "remarks_table rt ON u.employee_id = rt.user_id AND MONTH(rt.enteredDate) = MONTH(CURDATE()) AND YEAR(rt.enteredDate) = YEAR(CURDATE())"
+      ],
+      "filters": {
+        "active": "u.is_active = 1 AND u.is_delete = 0",
+        "having": "HAVING COUNT(rt.id) = 0"
+      },
+      "sql_pattern": "SELECT COUNT(*) AS employee_count FROM (SELECT u.employee_id FROM user_table u LEFT JOIN remarks_table rt ON u.employee_id = rt.user_id AND MONTH(rt.enteredDate) = MONTH(CURDATE()) AND YEAR(rt.enteredDate) = YEAR(CURDATE()) WHERE u.is_active = 1 AND u.is_delete = 0 GROUP BY u.employee_id HAVING COUNT(rt.id) = 0) AS zero_remark_employees"
+    },
+    {
+      "id": "count_employees_completed_goals_month",
+      "intent": "scalar_count_employees_completed_goals",
+      "prompt": "How many employees have completed all their KRA goals this month?",
+      "business_meaning": "SCALAR COUNT — single number answer. Inner subquery finds employees who have zero incomplete goals this month using HAVING; outer query counts them. NEVER return a list of names for a 'how many' query.",
+      "tables": ["user_goal_mapping", "user_table", "status"],
+      "joins": [
+        "user_table u ON ugm.employee_id = u.employee_id",
+        "status s ON ugm.status_id = s.id"
+      ],
+      "filters": {
+        "active": "u.is_active = 1 AND u.is_delete = 0 AND ugm.isDelete = 0 AND ugm.isactive = 1",
+        "date": "MONTH(ugm.target_date) = MONTH(CURDATE()) AND YEAR(ugm.target_date) = YEAR(CURDATE())",
+        "having": "HAVING COUNT(CASE WHEN s.status_name != 'Completed' THEN 1 END) = 0"
+      },
+      "sql_pattern": "SELECT COUNT(*) AS employee_count FROM (SELECT u.employee_id FROM user_goal_mapping ugm JOIN user_table u ON ugm.employee_id = u.employee_id LEFT JOIN status s ON ugm.status_id = s.id WHERE u.is_active = 1 AND u.is_delete = 0 AND ugm.isDelete = 0 AND ugm.isactive = 1 AND MONTH(ugm.target_date) = MONTH(CURDATE()) AND YEAR(ugm.target_date) = YEAR(CURDATE()) GROUP BY u.employee_id HAVING COUNT(CASE WHEN s.status_name != 'Completed' THEN 1 END) = 0) AS fully_completed_employees"
+    },
+    {
       "id": "stream_employee_count",
       "intent": "employee_count_by_stream",
       "prompt": "Show employee count by stream.",
