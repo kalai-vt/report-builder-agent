@@ -15,9 +15,7 @@ from app.agents.clarification_agent import KRAClarificationDetector
 
 @pytest.fixture
 def det():
-    """Detector with DB and context-manager calls stubbed out."""
     d = KRAClarificationDetector()
-    d._get_pending_clarification = MagicMock(return_value=None)
     return d
 
 
@@ -471,7 +469,6 @@ class TestMergePrompt:
 
     def test_merged_all_teams_does_not_retrigger_team_clarification(self, d):
         """'Show remarks for all teams' must NOT need further clarification."""
-        d._get_pending_clarification = MagicMock(return_value=None)
         merged = d._merge_prompt("Show remarks for the team.", "All teams", ["team_or_lead", "period"])
         r = d.detect(merged)
         assert r["reason"] != "missing_team", f"merged={merged!r} still asks for team"

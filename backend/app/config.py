@@ -10,7 +10,7 @@ def _build_db_url() -> str:
     host = os.getenv("DB_HOST", "192.168.2.8")
     port = os.getenv("DB_PORT", "3306")
     user = os.getenv("DB_USER", "krauser")
-    password = quote_plus(os.getenv("DB_PASSWORD", "vThink135#"))
+    password = quote_plus(os.getenv("DB_PASSWORD", ""))
     name = os.getenv("DB_NAME", "vthink_kra")
     return f"mysql+pymysql://{user}:{password}@{host}:{port}/{name}?charset=utf8mb4"
 

@@ -1,0 +1,122 @@
+{
+  "tables": [
+    {
+      "table_name": "user_table",
+      "table_description": "Employee master table. Stores employee profile, reporting manager, designation, stream, email, and active/delete status.",
+      "columns": [
+        {"column_name": "employee_id", "data_type": "varchar", "column_description": "Unique employee identifier. Used to join with goal, remarks, and reporting hierarchy tables."},
+        {"column_name": "firstname", "data_type": "varchar", "column_description": "Employee first name."},
+        {"column_name": "lastname", "data_type": "varchar", "column_description": "Employee last name."},
+        {"column_name": "designation_id", "data_type": "int", "column_description": "Foreign key to designation.designation_id."},
+        {"column_name": "stream", "data_type": "int", "column_description": "Foreign key to tags.tag_id. Use tags.tag as readable stream name."},
+        {"column_name": "reporting_manager", "data_type": "varchar", "column_description": "Employee ID of the reporting manager. Used for direct and indirect hierarchy reports."},
+        {"column_name": "e_mail", "data_type": "varchar", "column_description": "Employee email address."},
+        {"column_name": "is_active", "data_type": "tinyint", "column_description": "1 means active employee."},
+        {"column_name": "is_delete", "data_type": "tinyint", "column_description": "0 means employee is not deleted."}
+      ]
+    },
+    {
+      "table_name": "user_goal_mapping",
+      "table_description": "Main KRA transaction table. Stores goal assignments for employees, status, target date, assigned date, and active/delete flags.",
+      "columns": [
+        {"column_name": "id", "data_type": "int", "column_description": "Unique assigned goal record ID. Use this for goal counts."},
+        {"column_name": "employee_id", "data_type": "varchar", "column_description": "Employee assigned to the goal. Joins user_table.employee_id."},
+        {"column_name": "goal_id", "data_type": "int", "column_description": "Goal reference. Joins master_goals.goal_id."},
+        {"column_name": "goal_desc", "data_type": "text", "column_description": "Custom goal description."},
+        {"column_name": "status_id", "data_type": "int", "column_description": "Goal status reference. Joins status.id."},
+        {"column_name": "target_date", "data_type": "date", "column_description": "Goal target date. Used for month, quarter, year, overdue, and trend reports."},
+        {"column_name": "assigned_date", "data_type": "date", "column_description": "Date when goal was assigned."},
+        {"column_name": "assigned_by", "data_type": "varchar", "column_description": "Employee ID of the person who assigned the goal."},
+        {"column_name": "isactive", "data_type": "tinyint", "column_description": "1 means active goal mapping."},
+        {"column_name": "isDelete", "data_type": "tinyint", "column_description": "0 means goal mapping is not deleted."}
+      ]
+    },
+    {
+      "table_name": "master_goals",
+      "table_description": "Goal master table. Stores reusable goal definitions, descriptions, and goal points or weightage.",
+      "columns": [
+        {"column_name": "goal_id", "data_type": "int", "column_description": "Unique goal ID. Joins user_goal_mapping.goal_id."},
+        {"column_name": "goal_desc", "data_type": "text", "column_description": "Master goal description."},
+        {"column_name": "weightage", "data_type": "decimal", "column_description": "Goal points or weightage used in point-based reports."}
+      ]
+    },
+    {
+      "table_name": "status",
+      "table_description": "Goal status lookup table. Used to identify completed, in-progress, pending, and other goal statuses.",
+      "columns": [
+        {"column_name": "id", "data_type": "int", "column_description": "Unique status ID. Joins user_goal_mapping.status_id."},
+        {"column_name": "status_name", "data_type": "varchar", "column_description": "Readable status name such as Completed, In Progress, Pending."}
+      ]
+    },
+    {
+      "table_name": "remarks_table",
+      "table_description": "Manager or lead remarks table. Used for filled/missing remark compliance and manager feedback.",
+      "columns": [
+        {"column_name": "id", "data_type": "int", "column_description": "Unique remark ID."},
+        {"column_name": "goal_id", "data_type": "int", "column_description": "Goal reference. Joins user_goal_mapping.goal_id."},
+        {"column_name": "user_id", "data_type": "varchar", "column_description": "Employee who received the remark."},
+        {"column_name": "given_by", "data_type": "varchar", "column_description": "Employee ID of the manager or lead who gave the remark."},
+        {"column_name": "remarks", "data_type": "text", "column_description": "Manager or lead feedback text."},
+        {"column_name": "performance_rating", "data_type": "decimal", "column_description": "Rating given with the remark."},
+        {"column_name": "enteredDate", "data_type": "datetime", "column_description": "Date when the remark was entered."},
+        {"column_name": "created_at", "data_type": "datetime", "column_description": "Remark creation timestamp, used in review history reports."}
+      ]
+    },
+    {
+      "table_name": "remarks_threads",
+      "table_description": "Employee/self remarks or threaded feedback table. Used for self-feedback and lead-vs-self remark comparison.",
+      "columns": [
+        {"column_name": "id", "data_type": "int", "column_description": "Unique thread remark ID."},
+        {"column_name": "goal_id", "data_type": "int", "column_description": "Goal reference. Joins user_goal_mapping.goal_id."},
+        {"column_name": "remark_text", "data_type": "text", "column_description": "Employee/self feedback text."}
+      ]
+    },
+    {
+      "table_name": "designation",
+      "table_description": "Designation lookup table. Stores employee designation names and active status.",
+      "columns": [
+        {"column_name": "designation_id", "data_type": "int", "column_description": "Unique designation ID. Joins user_table.designation_id."},
+        {"column_name": "designation_name", "data_type": "varchar", "column_description": "Readable designation name."},
+        {"column_name": "designation_level", "data_type": "varchar", "column_description": "Designation level, if available."},
+        {"column_name": "is_active", "data_type": "tinyint", "column_description": "1 means active designation."}
+      ]
+    },
+    {
+      "table_name": "tags",
+      "table_description": "Stream or department lookup table. user_table.stream stores tag_id, so always join tags for readable stream names.",
+      "columns": [
+        {"column_name": "tag_id", "data_type": "int", "column_description": "Unique tag ID. Joins user_table.stream."},
+        {"column_name": "tag", "data_type": "varchar", "column_description": "Readable stream or department name such as QA, Dev, Design."}
+      ]
+    },
+    {
+      "table_name": "goal_tag_category",
+      "table_description": "Mapping table between goals and goal categories.",
+      "columns": [
+        {"column_name": "goal_id", "data_type": "int", "column_description": "Goal reference. Joins master_goals.goal_id."},
+        {"column_name": "tag_cat_id", "data_type": "int", "column_description": "Category reference. Joins master_categories.category_id."},
+        {"column_name": "is_active", "data_type": "tinyint", "column_description": "1 means active goal-category mapping."}
+      ]
+    },
+    {
+      "table_name": "master_categories",
+      "table_description": "Goal category lookup table. Used for category-wise goal and compliance reports.",
+      "columns": [
+        {"column_name": "category_id", "data_type": "int", "column_description": "Unique category ID. Joins goal_tag_category.tag_cat_id."},
+        {"column_name": "category_name", "data_type": "varchar", "column_description": "Readable category name such as Core Expertise."},
+        {"column_name": "is_active", "data_type": "tinyint", "column_description": "1 means active category."}
+      ]
+    },
+    {
+      "table_name": "disagree_remarks_master",
+      "table_description": "Stores disagreed remark details, conflict comments, resolution comments, and disagreement dates.",
+      "columns": [
+        {"column_name": "remark_id", "data_type": "int", "column_description": "Reference to remarks_table.id."},
+        {"column_name": "disagree_comments", "data_type": "text", "column_description": "Comment explaining disagreement."},
+        {"column_name": "conflict_resolved_comment", "data_type": "text", "column_description": "Resolution comment for the disagreement."},
+        {"column_name": "disagree_date", "data_type": "datetime", "column_description": "Date when disagreement was recorded."},
+        {"column_name": "is_agree", "data_type": "tinyint", "column_description": "0 means disagreed; 1 means agreed."}
+      ]
+    }
+  ]
+}
