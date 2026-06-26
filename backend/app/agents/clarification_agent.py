@@ -475,23 +475,6 @@ class KRAClarificationDetector:
             return "feedback report"
         return "report"
 
-    # ── Pending-clarification state ───────────────────────────────────────────
-
-    def _get_pending_clarification(
-        self, user_id: str, chat_session_id: str
-    ) -> Optional[Dict[str, Any]]:
-        if not user_id:
-            return None
-        try:
-            from app.services.context_manager import active_report_context_manager
-
-            ctx = active_report_context_manager.get(user_id, chat_session_id)
-            if ctx.get("pending_clarification"):
-                return ctx
-        except Exception as exc:
-            logger.warning("[clarification] context read failed: %s", exc)
-        return None
-
     # ── Prompt merging ────────────────────────────────────────────────────────
 
     def _merge_prompt(

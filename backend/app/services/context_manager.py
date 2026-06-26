@@ -6,23 +6,6 @@ logger = logging.getLogger(__name__)
 
 _CONTEXT_TTL_SECONDS = 7200  # 2 hours
 
-_EMPTY: Dict[str, Any] = {
-    "report_type": "",
-    "primary_table": "",
-    "dimensions": [],
-    "metrics": [],
-    "filters": {},
-    "date_range": "",
-    "generated_sql": "",
-    "last_query": "",
-    "pending_clarification": False,
-    "original_prompt": "",
-    "missing_slots": [],
-    # Tracks how many clarification rounds have been attempted in one session.
-    # Capped at 1; after that the pipeline skips clarification and generates SQL.
-    "clarification_attempt_count": 0,
-}
-
 
 def _empty_context() -> Dict[str, Any]:
     return {

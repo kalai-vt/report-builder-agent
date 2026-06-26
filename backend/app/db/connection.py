@@ -17,6 +17,13 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _rows(result) -> Tuple[List[dict], List[str]]:
+    """Convert a SQLAlchemy result set into (rows, columns)."""
+    columns = list(result.keys())
+    rows = [dict(zip(columns, row)) for row in result.fetchall()]
+    return rows, columns
+
+
 class DatabaseManager:
     def __init__(self):
         self.engine = create_engine(
@@ -77,9 +84,7 @@ class DatabaseManager:
         bound = params or {}
         with self.engine.connect() as conn:
             self._set_timeout(conn)
-            result  = conn.execute(text(sql), bound)
-            columns = list(result.keys())
-            rows    = [dict(zip(columns, row)) for row in result.fetchall()]
+            rows, columns = _rows(conn.execute(text(sql), bound))
             return rows, columns
 
     def execute_paginated(
@@ -103,9 +108,7 @@ class DatabaseManager:
         if _BARE_LIMIT_RE.search(sql):
             with self.engine.connect() as conn:
                 self._set_timeout(conn)
-                result  = conn.execute(text(sql), bound)
-                columns = list(result.keys())
-                rows    = [dict(zip(columns, row)) for row in result.fetchall()]
+                rows, columns = _rows(conn.execute(text(sql), bound))
             total_rows = len(rows)
             logger.debug(f"[execute_paginated] top-N path rows={total_rows}")
             return rows, columns, total_rows, 1
@@ -118,13 +121,20 @@ class DatabaseManager:
         with self.engine.connect() as conn:
             self._set_timeout(conn)
 
-            count_sql  = f"SELECT COUNT(*) FROM ({sql}) AS _pag_count"
-            total_rows = conn.execute(text(count_sql), bound).scalar() or 0
-
-            paged_sql  = f"{sql} LIMIT {page_size} OFFSET {offset}"
+            # Single query: window function counts total rows without a second round-trip.
+            # COUNT(*) OVER() is evaluated before LIMIT in MySQL 8.0, so it reflects
+            # the full result set size even when only page_size rows are returned.
+            paged_sql  = (
+                f"SELECT *, COUNT(*) OVER() AS ___total___ "
+                f"FROM ({sql}) AS _pag LIMIT {page_size} OFFSET {offset}"
+            )
             result     = conn.execute(text(paged_sql), bound)
-            columns    = list(result.keys())
-            rows       = [dict(zip(columns, row)) for row in result.fetchall()]
+            all_cols   = list(result.keys())
+            raw        = result.fetchall()
+
+        total_rows = int(raw[0][-1]) if raw else 0
+        columns    = all_cols[:-1]          # strip ___total___
+        rows       = [dict(zip(columns, row[:-1])) for row in raw]
 
         total_pages = max(1, math.ceil(total_rows / page_size)) if total_rows else 1
         logger.debug(
