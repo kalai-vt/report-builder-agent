@@ -429,7 +429,7 @@ const useStore = create(
             ? chatHistory.map((m) => (m.id === pendingThinkingId ? newMsg : m))
             : [...chatHistory, newMsg]
 
-        if (['greeting', 'off_topic', 'filter_redirect', 'restricted_operation'].includes(status)) {
+        if (['greeting', 'off_topic', 'filter_redirect'].includes(status)) {
           set({
             status, message: data.message || '', suggestions: data.suggestions || null,
             sessionId: data.session_id,
@@ -489,7 +489,6 @@ const useStore = create(
             refreshMode: data.refresh_mode || false,
             refreshedAt: data.refreshed_at || null,
             error: data.error || null,
-            errorCode: data.error_code || null,
             hasData: rows.length > 0,
             clarification: null, message: null, suggestions: null,
             activeFilters: {},
