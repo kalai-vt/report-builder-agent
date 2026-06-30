@@ -24,58 +24,6 @@ _FILTER_REDIRECT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Matches NL write/action intents — create, update, delete, modify, assign, reassign.
-# Applied at EVERY query entry point before the pipeline starts.
-# Qualifier group: a/an/the/all/this/that/my/their/his/her/our/your
-_QUAL = r"(?:a[n]?|the|all|this|that|my|their|his|her|our|your)\s+"
-# Domain entities (records in the DB)
-_DOM  = (
-    r"(?:goal|kra|employee|user|record|entry|task|target"
-    r"|stream|department|category|tag|role|plan|team|mapping|designation|remark)"
-)
-# Mutable attributes — things users explicitly modify (e.g. "change the weight of X to Y")
-_ATTR = (
-    r"(?:goal|kra|employee|user|record|entry|task|target|stream|department|category"
-    r"|tag|role|plan|team|mapping|designation|remark|status|data|field|completion"
-    r"|name|email|date|weight|weightage|point|score|rating|value|deadline|target.?date"
-    r"|description|percentage|priority|level|rank|salary|title)"
-)
-_WRITE_INTENT_RE = re.compile(
-    r"(?:"
-    # Raw SQL DML/DDL commands — unambiguous regardless of context
-    r"\bdelete\s+from\b"
-    r"|\bdrop\s+(?:table|database|view|index|procedure|function|trigger)\b"
-    r"|\btruncate\b"
-    r"|\balter\s+table\b"
-    # create/insert: catch-all — any noun after verb is a write intent
-    r"|\b(?:create|insert)\s+(?:" + _QUAL + r")?(?:new\s+)?\w+"
-    # add + domain entity
-    r"|\badd\s+(?:" + _QUAL + r")?(?:new\s+)?" + _DOM + r"s?\b"
-    # update/modify/edit/change + optional qualifier + mutable attribute OR domain entity
-    r"|\b(?:update|modify|edit|change)\s+(?:" + _QUAL + r")?(?:new\s+)?" + _ATTR + r"s?\b"
-    # change/update/set [attribute] OF/FOR [entity]  →  "change the point weight of the goal"
-    r"|\b(?:change|update|set)\s+(?:" + _QUAL + r")?" + _ATTR + r"s?\s+(?:of|for)\b"
-    # change/update/set ... to [number]  →  "change the weight ... to 7"
-    r"|\b(?:change|update|modify|set)\b[^.!?\n]{1,80}?\bto\s+\d"
-    # update [name] [attribute] to [value]  →  "update baskar designation to tc"
-    r"|\b(?:update|change|modify|set)\b[^!?\n]{0,60}?\b" + _ATTR + r"\b[^!?\n]{0,30}?\bto\s+\w"
-    # delete/remove + optional qualifier + domain entity
-    r"|\b(?:delete|remove)\s+(?:" + _QUAL + r")?" + _DOM + r"s?\b"
-    # reassign is always a write intent
-    r"|\breassign\b|\bre-assign\b"
-    # assign + optional qualifier + domain entity
-    r"|\bassign\s+(?:" + _QUAL + r")?(?:new\s+)?" + _DOM + r"s?\b"
-    # assign [anything ≤40 chars] to [employee/user/team/dept/stream]
-    r"|\bassign\b.{0,40}?\bto\s+(?:a[n]?\s+)?(?:employee|user|team|department|stream)\b"
-    r")",
-    re.IGNORECASE,
-)
-
-_WRITE_RESTRICTED_MSG = (
-    "AI Report Builder supports read-only reporting and analytics. "
-    "Operations such as create, update, delete, modify, assign, or reassign are not supported."
-)
-
 # Matches "Specific team lead", "Specific lead", "specific team lead — please provide..."
 _SPECIFIC_LEAD_RE = re.compile(
     r"^\s*specific\s+(team\s+)?lead\b",
@@ -210,8 +158,7 @@ class ReplayRequest(BaseModel):
 
 
 class ReportResponse(BaseModel):
-    status: str = Field(..., description="greeting | off_topic | filter_redirect | clarification_needed | restricted_operation | success | error")
-    title: Optional[str] = None
+    status: str = Field(..., description="greeting | off_topic | filter_redirect | clarification_needed | success | error")
 
     # Greeting / off-topic / clarification
     message: Optional[str] = None
@@ -291,13 +238,6 @@ def _build_report_response(
             message=result.get("message", ""),
             session_id=session_id,
         )
-    if status == "restricted_operation":
-        return ReportResponse(
-            status="restricted_operation",
-            title="Operation Restricted",
-            message=result.get("message", _WRITE_RESTRICTED_MSG),
-            session_id=session_id,
-        )
     if status == "clarification_needed":
         question = (
             result.get("follow_up_question")
@@ -330,7 +270,6 @@ def _build_report_response(
         row_count=result.get("row_count", 0),
         execution_time=result.get("execution_time", 0.0),
         error=result.get("error"),
-        error_code=result.get("error_code"),
         cache_hit=result.get("cache_hit", False),
         page=result.get("page", 1),
         page_size=result.get("page_size", settings.PAGE_SIZE),
@@ -360,12 +299,6 @@ def _build_report_response(
 )
 async def run_query(request: QueryRequest):
     try:
-        if _WRITE_INTENT_RE.search(request.query):
-            return QueryResponse(
-                status="restricted_operation",
-                message=_WRITE_RESTRICTED_MSG,
-            )
-
         # Create a session so validated SQL is cached in Redis,
         # enabling /report/refresh and /report/stream for this query.
         session_id = session_store.create({
@@ -440,19 +373,6 @@ async def generate_report(request: GenerateRequest) -> ReportResponse:
             return ReportResponse(
                 status="filter_redirect",
                 message=_FILTER_REDIRECT_MSG,
-                session_id=session_id,
-            )
-
-        # Short-circuit: block write/action intents before the pipeline runs.
-        if _WRITE_INTENT_RE.search(request.query):
-            logger.info(
-                f"[generate] restricted_operation user={request.user_id} "
-                f"query={request.query[:60]!r}"
-            )
-            return ReportResponse(
-                status="restricted_operation",
-                title="Operation Restricted",
-                message=_WRITE_RESTRICTED_MSG,
                 session_id=session_id,
             )
 
@@ -570,24 +490,6 @@ async def clarify_report(request: ClarifyRequest) -> ReportResponse:
             )
         else:
             query_to_run = request.user_answer
-
-        # Block write-intent in clarification answers (covers merged queries too)
-        if _WRITE_INTENT_RE.search(query_to_run):
-            restrict_sid = session_store.create({
-                "original_prompt": query_to_run,
-                "user_id": request.user_id,
-                "user_role": request.user_role,
-            })
-            logger.info(
-                f"[clarify] restricted_operation user={request.user_id} "
-                f"query={query_to_run[:60]!r}"
-            )
-            return ReportResponse(
-                status="restricted_operation",
-                title="Operation Restricted",
-                message=_WRITE_RESTRICTED_MSG,
-                session_id=restrict_sid,
-            )
 
         session_id = session_store.create({
             "original_prompt": query_to_run,

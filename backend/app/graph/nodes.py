@@ -513,16 +513,6 @@ def error_handler_node(state: AgentState) -> Dict[str, Any]:
         message = state["execution_result"]["error"]
 
     suggestion = _suggest(message)
-    msg_lower = message.lower()
-    is_unsafe = "unsafe" in msg_lower or "forbidden" in msg_lower
-    is_db_error = not is_unsafe and bool(re.search(
-        r"connection|timeout|operational.?error|pymysql|sqlalchemy"
-        r"|\bsyntax\b|doesn.t.exist|unknown.column|access.denied"
-        r"|deadlock|lock.wait|duplicate.entry|data.too.long",
-        msg_lower,
-    ))
-
-    _error_code = None if is_unsafe else ("DB_ERROR" if is_db_error else "SYSTEM_ERROR")
 
     formatted_error = {
         "sql_query": state.get("refined_sql", ""),
@@ -533,11 +523,6 @@ def error_handler_node(state: AgentState) -> Dict[str, Any]:
         "row_count": 0,
         "execution_time": state.get("execution_time", 0.0),
         "error": f"{message} — {suggestion}",
-        "error_code": _error_code,
-        **({"status": "restricted_operation", "message": (
-            "AI Report Builder supports read-only reporting and analytics. "
-            "Operations such as create, update, delete, modify, assign, or reassign are not supported."
-        )} if is_unsafe else {}),
     }
 
     step = {

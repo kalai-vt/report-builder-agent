@@ -117,7 +117,7 @@ function ReportBubble({ msg }) {
 
 // ─── Assistant: text bubble (greeting / off_topic / filter_redirect) ──────────
 
-const STATUS_ICON = { greeting: '👋', off_topic: '🤔', filter_redirect: '🔍', restricted_operation: '🚫' }
+const STATUS_ICON = { greeting: '👋', off_topic: '🤔', filter_redirect: '🔍' }
 
 function TextBubble({ msg, onSuggestion }) {
   const { content, suggestions, status, ts } = msg
