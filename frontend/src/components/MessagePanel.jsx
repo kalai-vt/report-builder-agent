@@ -22,11 +22,18 @@ const STATUS_META = {
     title_color: 'text-blue-800',
     text_color: 'text-blue-700',
   },
+  restricted_operation: {
+    icon: '🚫',
+    title: 'Operation Restricted',
+    bg: 'bg-red-50 border-red-200',
+    title_color: 'text-red-800',
+    text_color: 'text-red-700',
+  },
 }
 
 export default function MessagePanel() {
   const { status, message, suggestions, clearMessage } = useStore()
-  if (!['greeting', 'off_topic', 'filter_redirect'].includes(status)) return null
+  if (!['greeting', 'off_topic', 'filter_redirect', 'restricted_operation'].includes(status)) return null
 
   const meta = STATUS_META[status] || STATUS_META.off_topic
 

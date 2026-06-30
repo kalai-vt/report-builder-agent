@@ -60,23 +60,35 @@ function EmptyState() {
 }
 
 function NoResults() {
-  const { currentPrompt, error } = useStore()
+  const { currentPrompt, error, errorCode } = useStore()
+
+  let iconBg, iconColor, iconPath, title, body
+  if (!error) {
+    iconBg = 'bg-amber-50'; iconColor = 'text-amber-400'
+    iconPath = 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z'
+    title = 'No Results Found'
+    body = 'Query executed successfully, but returned no matching records. Try adjusting your filters or broadening your search.'
+  } else if (errorCode === 'DB_ERROR') {
+    iconBg = 'bg-red-50'; iconColor = 'text-red-400'
+    iconPath = 'M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125'
+    title = 'Database Connection Error'
+    body = 'A database connection or execution error occurred. Please try again. If the issue persists, contact your system administrator.'
+  } else {
+    iconBg = 'bg-orange-50'; iconColor = 'text-orange-400'
+    iconPath = 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z'
+    title = 'System Failed Error'
+    body = 'An unexpected system error occurred while processing your request. Please try again or rephrase your query.'
+  }
+
   return (
     <div className="flex flex-col items-center justify-center h-full px-8 text-center">
-      <div className="w-14 h-14 rounded-2xl bg-amber-50 flex items-center justify-center mb-3">
-        <svg className="w-7 h-7 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      <div className={`w-14 h-14 rounded-2xl ${iconBg} flex items-center justify-center mb-3`}>
+        <svg className={`w-7 h-7 ${iconColor}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d={iconPath} />
         </svg>
       </div>
-      <h2 className="text-base font-semibold text-gray-700 mb-1">
-        {error ? 'Query error' : 'No results found'}
-      </h2>
-      <p className="text-sm text-gray-400 max-w-xs">
-        {error
-          ? 'The SQL query encountered an error. See the SQL panel below or try rephrasing your query.'
-          : 'The query ran successfully but returned no matching records. Try adjusting your filters or query.'}
-      </p>
+      <h2 className="text-base font-semibold text-gray-700 mb-1">{title}</h2>
+      <p className="text-sm text-gray-400 max-w-xs">{body}</p>
       {currentPrompt && (
         <p className="mt-3 text-xs text-gray-400 italic max-w-xs truncate">
           Query: "{currentPrompt}"
@@ -86,11 +98,30 @@ function NoResults() {
   )
 }
 
+function RestrictedOperation({ message }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full px-8 text-center">
+      <div className="w-14 h-14 rounded-2xl bg-red-50 flex items-center justify-center mb-3">
+        <svg className="w-7 h-7 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+        </svg>
+      </div>
+      <h2 className="text-base font-semibold text-gray-700 mb-2">Operation Restricted</h2>
+      <p className="text-sm text-gray-500 max-w-sm leading-relaxed">
+        {message ||
+          'AI Report Builder supports read-only reporting and analytics. ' +
+          'Operations such as create, update, delete, modify, assign, or reassign are not supported.'}
+      </p>
+    </div>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ReportBuilderPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const { status, hasData, isLoading, sessionId, refreshReport } = useStore()
+  const { status, hasData, isLoading, sessionId, refreshReport, message } = useStore()
   const didAutoRefresh = useRef(false)
 
   useEffect(() => {
@@ -100,8 +131,9 @@ export default function ReportBuilderPage() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const showEmpty     = !isLoading && !hasData && !status
-  const showNoResults = !isLoading && !hasData && status === 'success'
+  const showRestricted = !isLoading && status === 'restricted_operation'
+  const showEmpty      = !isLoading && !hasData && !status
+  const showNoResults  = !isLoading && !hasData && status === 'success'
   // For chat-handled statuses, keep the left workspace as the empty state
   const showWorkspaceBlank = ['greeting', 'off_topic', 'filter_redirect', 'clarification_needed'].includes(status)
 
@@ -117,22 +149,25 @@ export default function ReportBuilderPage() {
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4">
 
+            {/* Restricted write/action operation */}
+            {showRestricted && <RestrictedOperation message={message} />}
+
             {/* Initial empty / chat-handled state */}
-            {(showEmpty || (showWorkspaceBlank && !hasData)) && !isLoading && <EmptyState />}
+            {!showRestricted && (showEmpty || (showWorkspaceBlank && !hasData)) && !isLoading && <EmptyState />}
 
             {/* Loading — no prior data */}
             {isLoading && !hasData && <LoadingOverlay />}
 
             {/* Query ran, 0 rows or SQL error */}
-            {showNoResults && (
+            {!showRestricted && showNoResults && (
               <>
                 <SqlPanel />
                 <NoResults />
               </>
             )}
 
-            {/* Report data */}
-            {hasData && (
+            {/* Report data (suppressed while a restriction notice is active) */}
+            {hasData && !showRestricted && (
               <>
                 <RefreshStatusBadge />
                 <SqlPanel />
